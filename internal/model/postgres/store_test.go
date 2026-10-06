@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,7 +37,8 @@ func TestPostgresHistoryAndInbox(t *testing.T) {
 		_, _ = pool.Exec(ctx, `DELETE FROM bot_updates WHERE update_id = $1`, updateID)
 	}()
 	now := time.Now().UTC().Truncate(time.Second)
-	msg := model.Message{MessageID: 7, Date: now.Add(-time.Hour).Unix(), Text: "Привет,\n как дела?", From: &model.User{Username: "ivan"}}
+	longText := "Привет,\n как дела?" + strings.Repeat("Я", 400)
+	msg := model.Message{MessageID: 7, Date: now.Add(-time.Hour).Unix(), Text: longText, From: &model.User{Username: "ivan"}, ReplyToMessage: &model.Message{MessageID: 6}}
 	msg.Chat.ID = chatID
 	if err := store.AddIncoming(ctx, msg, now); err != nil {
 		t.Fatal(err)
@@ -44,7 +46,12 @@ func TestPostgresHistoryAndInbox(t *testing.T) {
 	if err := store.AddIncoming(ctx, msg, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AddBotReply(ctx, chatID, 0, "MyBot", "Нормально!", now); err != nil {
+	if err := store.AddBotReply(ctx, chatID, 0, msg.MessageID, "MyBot", "Нормально!", now); err != nil {
+		t.Fatal(err)
+	}
+	older := model.Message{MessageID: 10, Date: now.Add(-3 * time.Hour).Unix(), Text: "хранится сутки"}
+	older.Chat.ID = chatID
+	if err := store.AddIncoming(ctx, older, now); err != nil {
 		t.Fatal(err)
 	}
 	otherTopic := model.Message{MessageID: 8, MessageThreadID: 99, Date: now.Unix(), Text: "другая тема"}
@@ -57,16 +64,16 @@ func TestPostgresHistoryAndInbox(t *testing.T) {
 	if err := store.AddIncoming(ctx, otherChat, now); err != nil {
 		t.Fatal(err)
 	}
-	prior, err := store.Conversation(ctx, chatID, 0, 999, now.Add(time.Second))
+	prior, err := store.Conversation(ctx, chatID, 0, now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(prior) != 2 || prior[0].Author != "@MyBot" || prior[1].Author != "@ivan" || prior[1].Text != "Привет, как дела?" {
+	if len(prior) != 2 || prior[0].Author != "@ivan" || prior[0].Text != longText || prior[0].MessageID != 7 || prior[0].ReplyToMessageID != 6 || prior[1].Author != "@MyBot" || prior[1].ReplyToMessageID != 7 || !prior[1].Bot {
 		t.Fatalf("wrong chat/topic history: %+v", prior)
 	}
-	withoutCurrent, err := store.Conversation(ctx, chatID, 0, msg.MessageID, now.Add(time.Second))
-	if err != nil || len(withoutCurrent) != 1 || withoutCurrent[0].Author != "@MyBot" {
-		t.Fatalf("current message leaked into retry context: %+v, %v", withoutCurrent, err)
+	repeated, err := store.Conversation(ctx, chatID, 0, now.Add(time.Second))
+	if err != nil || len(repeated) != 2 {
+		t.Fatalf("duplicate message changed context: %+v, %v", repeated, err)
 	}
 	item := model.Update{UpdateID: updateID, Message: &msg}
 	raw, _ := json.Marshal(item)
@@ -97,7 +104,7 @@ func TestPostgresHistoryAndInbox(t *testing.T) {
 	if err := store.Prune(ctx, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM bot_history WHERE chat_id = $1`, chatID).Scan(&count); err != nil || count != 3 {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM bot_history WHERE chat_id = $1`, chatID).Scan(&count); err != nil || count != 4 {
 		t.Fatalf("expired row not pruned: %d, %v", count, err)
 	}
 }

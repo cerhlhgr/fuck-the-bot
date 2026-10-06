@@ -10,9 +10,8 @@ import (
 )
 
 const (
-	HistoryLifetime    = 24 * time.Hour
-	MaxSavedRunes      = 320
-	MaxContextMessages = 80
+	HistoryLifetime = 24 * time.Hour
+	ContextLifetime = 2 * time.Hour
 )
 
 var ErrNoUpdates = errors.New("no queued updates")
@@ -43,6 +42,7 @@ type Message struct {
 	Entities        []Entity `json:"entities"`
 	Caption         string   `json:"caption"`
 	CaptionEntities []Entity `json:"caption_entities"`
+	ReplyToMessage  *Message `json:"reply_to_message"`
 }
 
 type Update struct {
@@ -51,9 +51,25 @@ type Update struct {
 }
 
 type HistoryEntry struct {
-	Date   time.Time
-	Author string
-	Text   string
+	Date             time.Time
+	MessageID        int64
+	ReplyToMessageID int64
+	Author           string
+	Text             string
+	Bot              bool
+}
+
+type Decision struct {
+	ReplyToMessageID int64
+	Reply            string
+}
+
+type DecisionRequest struct {
+	BotUsername             string
+	CurrentMessageID        int64
+	CurrentReplyToMessageID int64
+	CurrentRepliedToBot     bool
+	History                 []HistoryEntry
 }
 
 type Repository interface {
@@ -62,8 +78,8 @@ type Repository interface {
 	MarkUpdateProcessed(context.Context, int64) error
 	Prune(context.Context, time.Time) error
 	AddIncoming(context.Context, Message, time.Time) error
-	AddBotReply(context.Context, int64, int64, string, string, time.Time) error
-	Conversation(context.Context, int64, int64, int64, time.Time) ([]HistoryEntry, error)
+	AddBotReply(context.Context, int64, int64, int64, string, string, time.Time) error
+	Conversation(context.Context, int64, int64, time.Time) ([]HistoryEntry, error)
 }
 
 func MentionedText(msg Message, username string) (string, bool) {

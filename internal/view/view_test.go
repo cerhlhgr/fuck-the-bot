@@ -1,6 +1,7 @@
 package view
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -8,32 +9,50 @@ import (
 	"fuck-the-bot/internal/model"
 )
 
-func TestPromptAndConversationLimits(t *testing.T) {
+func TestConversationIncludesAllMessages(t *testing.T) {
 	now := time.Now()
-	var entries []model.HistoryEntry
-	for i := 0; i < 85; i++ {
-		entries = append(entries, model.HistoryEntry{Date: now.Add(-time.Duration(i) * time.Minute), Author: "@ivan", Text: model.CompactText(strings.Repeat("Я", 500), model.MaxSavedRunes)})
+	entries := make([]model.HistoryEntry, 85)
+	for i := range entries {
+		entries[i] = model.HistoryEntry{Date: now.Add(time.Duration(i) * time.Minute), MessageID: int64(i + 1), Author: "@ivan", Text: strings.Repeat("Я", 500)}
 	}
-	conversation := Conversation(entries)
-	if len([]rune(conversation)) > MaxContextRunes || strings.Count(conversation, "@ivan:") > model.MaxContextMessages {
-		t.Fatalf("context limits exceeded: %d runes", len([]rune(conversation)))
+	var transcript []struct {
+		MessageID int64  `json:"message_id"`
+		Text      string `json:"text"`
 	}
-	prompt := SystemPrompt("привет", entries)
-	if !strings.Contains(prompt, "ранее был диалог в беседе:\n") || !strings.Contains(prompt, "Текущее сообщение: привет") || !strings.Contains(prompt, `{"reply":"твой ответ"}`) {
+	if err := json.Unmarshal([]byte(Conversation(entries)), &transcript); err != nil {
+		t.Fatal(err)
+	}
+	if len(transcript) != 85 || transcript[0].MessageID != 1 || transcript[84].MessageID != 85 || len([]rune(transcript[84].Text)) != 500 {
+		t.Fatalf("history was truncated: count=%d", len(transcript))
+	}
+	prompt := SystemPrompt(model.DecisionRequest{BotUsername: "MyBot", CurrentMessageID: 85, History: entries})
+	if !strings.Contains(prompt, "последние 2 часа") || !strings.Contains(prompt, "message_id=85") || !strings.Contains(prompt, `"reply":null`) {
 		t.Fatalf("unexpected prompt: %q", prompt)
 	}
 }
 
-func TestAIReplyAndTelegramChunks(t *testing.T) {
-	got, err := ParseAIReply(`{"reply":"Ну привет!"}`)
-	if err != nil || got != "Ну привет!" {
-		t.Fatalf("got %q, %v", got, err)
+func TestParseAIDecision(t *testing.T) {
+	reply, err := ParseAIDecision(`{"reply":"Ну привет!","reply_to_message_id":17}`)
+	if err != nil || reply.Reply != "Ну привет!" || reply.ReplyToMessageID != 17 {
+		t.Fatalf("reply = %+v, %v", reply, err)
 	}
-	for _, invalid := range []string{`{"reply":""}`, "```json\n{\"reply\":\"hi\"}\n```", `{"reply":"hi"} trailing`} {
-		if _, err := ParseAIReply(invalid); err == nil {
+	silent, err := ParseAIDecision(`{"reply":null,"reply_to_message_id":null}`)
+	if err != nil || silent.Reply != "" || silent.ReplyToMessageID != 0 {
+		t.Fatalf("silence = %+v, %v", silent, err)
+	}
+	for _, invalid := range []string{
+		`{"reply":"hi","reply_to_message_id":null}`,
+		`{"reply":null,"reply_to_message_id":17}`,
+		"```json\n{\"reply\":\"hi\"}\n```",
+		`{"reply":"hi","reply_to_message_id":17} trailing`,
+	} {
+		if _, err := ParseAIDecision(invalid); err == nil {
 			t.Errorf("accepted %q", invalid)
 		}
 	}
+}
+
+func TestTelegramChunks(t *testing.T) {
 	chunks := TelegramChunks(strings.Repeat("😈", 2500))
 	if len(chunks) != 2 || len([]rune(chunks[0])) != 2000 || len([]rune(chunks[1])) != 500 {
 		t.Fatalf("unexpected chunks: %d", len(chunks))

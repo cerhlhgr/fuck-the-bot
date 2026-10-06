@@ -26,7 +26,7 @@ func New(key, modelName string) *Client {
 	return &Client{http: &http.Client{Timeout: 60 * time.Second}, key: key, model: modelName}
 }
 
-func (c *Client) Ask(ctx context.Context, text string, history []model.HistoryEntry) (string, error) {
+func (c *Client) Ask(ctx context.Context, decisionRequest model.DecisionRequest) (model.Decision, error) {
 	input := struct {
 		Model    string `json:"model"`
 		Messages []struct {
@@ -38,29 +38,29 @@ func (c *Client) Ask(ctx context.Context, text string, history []model.HistoryEn
 		struct {
 			Role    string `json:"role"`
 			Content string `json:"content"`
-		}{"system", view.SystemPrompt(text, history)},
+		}{"system", view.SystemPrompt(decisionRequest)},
 		struct {
 			Role    string `json:"role"`
 			Content string `json:"content"`
-		}{"user", "Ответь на текст сообщения выше."},
+		}{"user", "Реши, отвечать ли на новое сообщение, и верни JSON."},
 	)
 	body, err := json.Marshal(input)
 	if err != nil {
-		return "", err
+		return model.Decision{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return model.Decision{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.key)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", err
+		return model.Decision{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("AI HTTP %d", resp.StatusCode)
+		return model.Decision{}, fmt.Errorf("AI HTTP %d", resp.StatusCode)
 	}
 	var result struct {
 		Choices []struct {
@@ -70,10 +70,10 @@ func (c *Client) Ask(ctx context.Context, text string, history []model.HistoryEn
 		} `json:"choices"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
-		return "", err
+		return model.Decision{}, err
 	}
 	if len(result.Choices) == 0 {
-		return "", errors.New("AI returned no choices")
+		return model.Decision{}, errors.New("AI returned no choices")
 	}
-	return view.ParseAIReply(result.Choices[0].Message.Content)
+	return view.ParseAIDecision(result.Choices[0].Message.Content)
 }

@@ -98,9 +98,8 @@ func (s *Store) AddIncoming(ctx context.Context, msg model.Message, now time.Tim
 	if content == "" {
 		content = msg.Caption
 	}
-	content = model.CompactText(content, model.MaxSavedRunes)
 	if content == "" {
-		return nil
+		content = "[сообщение без текста]"
 	}
 	date := time.Unix(msg.Date, 0)
 	if msg.Date == 0 || date.After(now) {
@@ -109,40 +108,41 @@ func (s *Store) AddIncoming(ctx context.Context, msg model.Message, now time.Tim
 	if date.Before(now.Add(-model.HistoryLifetime)) {
 		return nil
 	}
+	replyToMessageID := int64(0)
+	if msg.ReplyToMessage != nil {
+		replyToMessageID = msg.ReplyToMessage.MessageID
+	}
 	queryCtx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	_, err := s.pool.Exec(queryCtx, `
-		INSERT INTO bot_history (chat_id, thread_id, message_id, sent_at, author, body, bot)
-		VALUES ($1, $2, $3, $4, $5, $6, FALSE)
+		INSERT INTO bot_history (chat_id, thread_id, message_id, reply_to_message_id, sent_at, author, body, bot)
+		VALUES ($1, $2, $3, NULLIF($4, 0), $5, $6, $7, FALSE)
 		ON CONFLICT (chat_id, message_id) DO NOTHING`,
-		msg.Chat.ID, msg.MessageThreadID, msg.MessageID, date, model.AuthorName(msg.From), content)
+		msg.Chat.ID, msg.MessageThreadID, msg.MessageID, replyToMessageID, date, model.AuthorName(msg.From), content)
 	return err
 }
 
-func (s *Store) AddBotReply(ctx context.Context, chatID, threadID int64, username, answer string, now time.Time) error {
-	content := model.CompactText(answer, model.MaxSavedRunes)
-	if content == "" {
+func (s *Store) AddBotReply(ctx context.Context, chatID, threadID, replyToMessageID int64, username, answer string, now time.Time) error {
+	if answer == "" {
 		return nil
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	_, err := s.pool.Exec(queryCtx, `
-		INSERT INTO bot_history (chat_id, thread_id, sent_at, author, body, bot)
-		VALUES ($1, $2, $3, $4, $5, TRUE)`,
-		chatID, threadID, now, "@"+username, content)
+		INSERT INTO bot_history (chat_id, thread_id, reply_to_message_id, sent_at, author, body, bot)
+		VALUES ($1, $2, $3, $4, $5, $6, TRUE)`,
+		chatID, threadID, replyToMessageID, now, "@"+username, answer)
 	return err
 }
 
-func (s *Store) Conversation(ctx context.Context, chatID, threadID, currentMessageID int64, now time.Time) ([]model.HistoryEntry, error) {
+func (s *Store) Conversation(ctx context.Context, chatID, threadID int64, now time.Time) ([]model.HistoryEntry, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	rows, err := s.pool.Query(queryCtx, `
-		SELECT sent_at, author, body
+		SELECT sent_at, COALESCE(message_id, 0), COALESCE(reply_to_message_id, 0), author, body, bot
 		FROM bot_history
 		WHERE chat_id = $1 AND thread_id = $2 AND sent_at >= $3 AND sent_at <= $4
-			AND (message_id IS NULL OR message_id <> $5)
-		ORDER BY sent_at DESC, id DESC
-		LIMIT $6`, chatID, threadID, now.Add(-model.HistoryLifetime), now, currentMessageID, model.MaxContextMessages)
+		ORDER BY sent_at ASC, id ASC`, chatID, threadID, now.Add(-model.ContextLifetime), now)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +150,7 @@ func (s *Store) Conversation(ctx context.Context, chatID, threadID, currentMessa
 	var entries []model.HistoryEntry
 	for rows.Next() {
 		var entry model.HistoryEntry
-		if err := rows.Scan(&entry.Date, &entry.Author, &entry.Text); err != nil {
+		if err := rows.Scan(&entry.Date, &entry.MessageID, &entry.ReplyToMessageID, &entry.Author, &entry.Text, &entry.Bot); err != nil {
 			return nil, err
 		}
 		entries = append(entries, entry)

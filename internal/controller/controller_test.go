@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -13,11 +14,12 @@ import (
 )
 
 type fakeRepo struct {
-	queued     []model.Update
-	insertErr  error
-	incoming   []model.Message
-	botReplies []string
-	history    []model.HistoryEntry
+	queued       []model.Update
+	insertErr    error
+	incoming     []model.Message
+	botReplies   []string
+	replyTargets []int64
+	history      []model.HistoryEntry
 }
 
 func (f *fakeRepo) EnqueueUpdate(_ context.Context, item model.Update, _ []byte) error {
@@ -39,24 +41,32 @@ func (f *fakeRepo) MarkUpdateProcessed(context.Context, int64) error { return ni
 func (f *fakeRepo) Prune(context.Context, time.Time) error           { return nil }
 func (f *fakeRepo) AddIncoming(_ context.Context, msg model.Message, _ time.Time) error {
 	f.incoming = append(f.incoming, msg)
+	text := msg.Text
+	if text == "" {
+		text = msg.Caption
+	}
+	f.history = append(f.history, model.HistoryEntry{MessageID: msg.MessageID, Text: text, Author: model.AuthorName(msg.From)})
 	return nil
 }
-func (f *fakeRepo) AddBotReply(_ context.Context, _, _ int64, _ string, answer string, _ time.Time) error {
+func (f *fakeRepo) AddBotReply(_ context.Context, _, _, replyToMessageID int64, _ string, answer string, _ time.Time) error {
 	f.botReplies = append(f.botReplies, answer)
+	f.replyTargets = append(f.replyTargets, replyToMessageID)
 	return nil
 }
-func (f *fakeRepo) Conversation(context.Context, int64, int64, int64, time.Time) ([]model.HistoryEntry, error) {
+func (f *fakeRepo) Conversation(context.Context, int64, int64, time.Time) ([]model.HistoryEntry, error) {
 	return f.history, nil
 }
 
 type fakeAI struct {
-	text    string
-	history []model.HistoryEntry
+	request  model.DecisionRequest
+	decision model.Decision
+	calls    int
 }
 
-func (f *fakeAI) Ask(_ context.Context, text string, history []model.HistoryEntry) (string, error) {
-	f.text, f.history = text, history
-	return "Ну привет!", nil
+func (f *fakeAI) Ask(_ context.Context, request model.DecisionRequest) (model.Decision, error) {
+	f.request = request
+	f.calls++
+	return f.decision, nil
 }
 
 type fakeTelegram struct {
@@ -102,18 +112,78 @@ func TestWebhookHandler(t *testing.T) {
 	}
 }
 
-func TestWorkerProcessesMentionWithPriorConversation(t *testing.T) {
-	prior := []model.HistoryEntry{{Date: time.Now().Add(-time.Minute), Author: "@ivan", Text: "старое сообщение"}}
-	repo := &fakeRepo{history: prior}
-	ai := &fakeAI{}
+func TestWorkerLetsAIChooseEarlierMessage(t *testing.T) {
+	repo := &fakeRepo{history: []model.HistoryEntry{{MessageID: 5, Text: "старый вопрос", Author: "@ivan"}}}
+	ai := &fakeAI{decision: model.Decision{Reply: "Ну привет!", ReplyToMessageID: 5}}
 	tg := &fakeTelegram{}
-	worker := Worker{Repo: repo, AI: ai, Telegram: tg, Username: "MyBot"}
-	msg := model.Message{MessageID: 7, Text: "@MyBot привет", Entities: []model.Entity{{Type: "mention", Offset: 0, Length: 6}}}
+	worker := Worker{Repo: repo, AI: ai, Telegram: tg, BotID: 99, Username: "MyBot"}
+	msg := model.Message{MessageID: 7, Text: "что думаешь?"}
 	msg.Chat.ID = -42
 	if err := worker.Process(context.Background(), model.Update{UpdateID: 12, Message: &msg}); err != nil {
 		t.Fatal(err)
 	}
-	if ai.text != "привет" || len(ai.history) != 1 || ai.history[0].Text != "старое сообщение" || len(repo.incoming) != 1 || len(repo.botReplies) != 1 || len(tg.messages) != 1 || tg.messages[0].Chat.ID != -42 || tg.answers[0] != "Ну привет!" {
-		t.Fatalf("unexpected processing: ai=%+v incoming=%+v replies=%+v", ai, repo.incoming, tg.answers)
+	if ai.calls != 1 || ai.request.CurrentMessageID != 7 || len(ai.request.History) != 2 || ai.request.History[1].Text != "что думаешь?" || len(tg.messages) != 1 || tg.messages[0].MessageID != 5 || tg.messages[0].Chat.ID != -42 || len(repo.replyTargets) != 1 || repo.replyTargets[0] != 5 {
+		t.Fatalf("unexpected decision handling: ai=%+v sent=%+v targets=%+v", ai, tg.messages, repo.replyTargets)
+	}
+}
+
+func TestWorkerPassesReplyToBotToAI(t *testing.T) {
+	var item model.Update
+	const payload = `{"update_id":13,"message":{"message_id":8,"chat":{"id":-42},"from":{"id":7},"text":"а почему?","reply_to_message":{"message_id":5,"from":{"id":99,"is_bot":true},"text":"Ну привет!"}}}`
+	if err := json.Unmarshal([]byte(payload), &item); err != nil {
+		t.Fatal(err)
+	}
+	repo := &fakeRepo{}
+	ai := &fakeAI{decision: model.Decision{Reply: "Потому что", ReplyToMessageID: 8}}
+	tg := &fakeTelegram{}
+	worker := Worker{Repo: repo, AI: ai, Telegram: tg, BotID: 99, Username: "MyBot"}
+	if err := worker.Process(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	if !ai.request.CurrentRepliedToBot || ai.request.CurrentReplyToMessageID != 5 || len(tg.messages) != 1 || tg.messages[0].MessageID != 8 {
+		t.Fatalf("reply context was lost: ai=%+v sent=%+v", ai, tg.messages)
+	}
+}
+
+func TestWorkerHonorsSilenceAndRejectsUnknownTarget(t *testing.T) {
+	repo := &fakeRepo{}
+	ai := &fakeAI{}
+	tg := &fakeTelegram{}
+	worker := Worker{Repo: repo, AI: ai, Telegram: tg, BotID: 99, Username: "MyBot"}
+	msg := model.Message{MessageID: 8, Text: "обычная реплика"}
+	msg.Chat.ID = -42
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 14, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if ai.calls != 1 || len(tg.messages) != 0 || len(repo.incoming) != 1 {
+		t.Fatalf("silent decision sent a reply: calls=%d sent=%d incoming=%d", ai.calls, len(tg.messages), len(repo.incoming))
+	}
+	ai.decision = model.Decision{Reply: "ответ", ReplyToMessageID: 999}
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 15, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(tg.messages) != 0 {
+		t.Fatal("AI-selected unknown target was sent to Telegram")
+	}
+}
+
+func TestWorkerStoresOtherBotMessagesWithoutReplying(t *testing.T) {
+	repo := &fakeRepo{}
+	ai := &fakeAI{}
+	worker := Worker{Repo: repo, AI: ai, Telegram: &fakeTelegram{}, BotID: 99, Username: "MyBot"}
+	msg := model.Message{MessageID: 8, Text: "сообщение другого бота", From: &model.User{ID: 100, IsBot: true}}
+	msg.Chat.ID = -42
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 16, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.incoming) != 1 || ai.calls != 0 {
+		t.Fatalf("other bot message: saved=%d AI calls=%d", len(repo.incoming), ai.calls)
+	}
+	msg.From.ID = 99
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 17, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.incoming) != 1 {
+		t.Fatal("own bot message was stored twice")
 	}
 }

@@ -117,14 +117,3 @@ func TestWorkerProcessesMentionWithPriorConversation(t *testing.T) {
 		t.Fatalf("unexpected processing: ai=%+v incoming=%+v replies=%+v", ai, repo.incoming, tg.answers)
 	}
 }
-
-func TestValidateWebhookURL(t *testing.T) {
-	if err := ValidateWebhookURL("https://bot.example.com/telegram/webhook"); err != nil {
-		t.Fatal(err)
-	}
-	for _, url := range []string{"http://bot.example.com/telegram/webhook", "https://bot.example.com/other", "https://bot.example.com:8080/telegram/webhook"} {
-		if err := ValidateWebhookURL(url); err == nil {
-			t.Errorf("accepted invalid webhook URL %q", url)
-		}
-	}
-}

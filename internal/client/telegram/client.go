@@ -60,22 +60,6 @@ func (c *Client) GetMe(ctx context.Context) (model.User, error) {
 	return me, err
 }
 
-func (c *Client) RegisterWebhook(ctx context.Context, webhookURL string) error {
-	var registered bool
-	err := c.call(ctx, "setWebhook", struct {
-		URL            string   `json:"url"`
-		AllowedUpdates []string `json:"allowed_updates"`
-		MaxConnections int      `json:"max_connections"`
-	}{webhookURL, []string{"message"}, 1}, &registered)
-	if err != nil {
-		return err
-	}
-	if !registered {
-		return fmt.Errorf("Telegram did not accept the webhook")
-	}
-	return nil
-}
-
 func (c *Client) SendMessage(ctx context.Context, original model.Message, answer string) error {
 	for i, chunk := range view.TelegramChunks(answer) {
 		input := struct {

@@ -17,10 +17,17 @@ DATABASE_URL=postgres://user:password@host:5432/database?sslmode=require
 ```dotenv
 AI_MODEL=deepseek/deepseek-v4-pro
 LISTEN_ADDR=:8080
-WEBHOOK_URL=https://bot.example.com/telegram/webhook
 ```
 
-`WEBHOOK_URL` нужен только для автоматического вызова Telegram `setWebhook` при запуске. Это полный публичный HTTPS-адрес приложения, а не адрес PostgreSQL. Если переменная отсутствует, бот запускает HTTP-хендлер без регистрации: вызовите `setWebhook` самостоятельно с адресом `https://<домен>/telegram/webhook`. Само наличие хендлера не сообщает Telegram, куда отправлять обновления.
+После публикации приложения один раз зарегистрируйте его публичный HTTPS-адрес в Telegram (замените `bot.example.com` на домен приложения):
+
+```sh
+curl --request POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+  --data-urlencode "url=https://bot.example.com/telegram/webhook" \
+  --data-urlencode 'allowed_updates=["message"]'
+```
+
+Бот сам не вызывает `setWebhook`. Хендлер слушает путь `/telegram/webhook`, но наличие хендлера не сообщает Telegram публичный адрес.
 
 `WEBHOOK_SECRET` больше не используется. Хендлер принимает POST без проверки заголовка `X-Telegram-Bot-Api-Secret-Token`; публичную ручку может вызвать любой, кто знает её адрес. Ограничение размера тела и проверка JSON остаются.
 

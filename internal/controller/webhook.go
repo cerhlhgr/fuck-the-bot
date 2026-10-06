@@ -2,11 +2,8 @@ package controller
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 
 	"fuck-the-bot/internal/model"
 )
@@ -65,15 +62,4 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 	}
 	w.WriteHeader(http.StatusOK)
-}
-
-func ValidateWebhookURL(rawURL string) error {
-	parsed, err := url.Parse(rawURL)
-	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.Path != WebhookPath || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return fmt.Errorf("WEBHOOK_URL must be an HTTPS URL ending in %s", WebhookPath)
-	}
-	if port := parsed.Port(); port != "" && port != "443" && port != "80" && port != "88" && port != "8443" {
-		return errors.New("WEBHOOK_URL uses a port Telegram does not support")
-	}
-	return nil
 }

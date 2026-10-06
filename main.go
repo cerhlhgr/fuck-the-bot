@@ -24,7 +24,6 @@ type config struct {
 	aiKey         string
 	model         string
 	databaseURL   string
-	webhookURL    string
 	listenAddr    string
 }
 
@@ -34,7 +33,6 @@ func main() {
 		aiKey:         os.Getenv("TIMEWEB_AI_API_KEY"),
 		model:         os.Getenv("AI_MODEL"),
 		databaseURL:   os.Getenv("DATABASE_URL"),
-		webhookURL:    os.Getenv("WEBHOOK_URL"),
 		listenAddr:    os.Getenv("LISTEN_ADDR"),
 	}
 	if cfg.telegramToken == "" || cfg.aiKey == "" || cfg.databaseURL == "" {
@@ -46,12 +44,6 @@ func main() {
 	if cfg.listenAddr == "" {
 		cfg.listenAddr = ":8080"
 	}
-	if cfg.webhookURL != "" {
-		if err := controller.ValidateWebhookURL(cfg.webhookURL); err != nil {
-			log.Fatalf("webhook configuration: %v", err)
-		}
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	pool, err := postgres.OpenPool(ctx, cfg.databaseURL)
@@ -87,27 +79,6 @@ func main() {
 		}
 	}()
 
-	if cfg.webhookURL != "" {
-		for ctx.Err() == nil {
-			if err := tg.RegisterWebhook(ctx, cfg.webhookURL); err == nil {
-				break
-			} else {
-				log.Printf("setWebhook: %v; retrying in 5 seconds", err)
-			}
-			select {
-			case <-ctx.Done():
-			case <-time.After(5 * time.Second):
-			}
-		}
-	} else {
-		log.Print("WEBHOOK_URL is empty; register the public webhook URL with Telegram manually")
-	}
-	if ctx.Err() != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-		return
-	}
 	log.Printf("webhook listening on %s for @%s", cfg.listenAddr, me.Username)
 
 	worker := &controller.Worker{Repo: repo, AI: ai.New(cfg.aiKey, cfg.model), Telegram: tg, Username: me.Username}

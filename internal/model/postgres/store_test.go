@@ -57,12 +57,16 @@ func TestPostgresHistoryAndInbox(t *testing.T) {
 	if err := store.AddIncoming(ctx, otherChat, now); err != nil {
 		t.Fatal(err)
 	}
-	prior, err := store.Conversation(ctx, chatID, 0, now.Add(time.Second))
+	prior, err := store.Conversation(ctx, chatID, 0, 999, now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(prior) != 2 || prior[0].Author != "@MyBot" || prior[1].Author != "@ivan" || prior[1].Text != "Привет, как дела?" {
 		t.Fatalf("wrong chat/topic history: %+v", prior)
+	}
+	withoutCurrent, err := store.Conversation(ctx, chatID, 0, msg.MessageID, now.Add(time.Second))
+	if err != nil || len(withoutCurrent) != 1 || withoutCurrent[0].Author != "@MyBot" {
+		t.Fatalf("current message leaked into retry context: %+v, %v", withoutCurrent, err)
 	}
 	item := model.Update{UpdateID: updateID, Message: &msg}
 	raw, _ := json.Marshal(item)

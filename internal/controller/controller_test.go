@@ -45,7 +45,7 @@ func (f *fakeRepo) AddBotReply(_ context.Context, _, _ int64, _ string, answer s
 	f.botReplies = append(f.botReplies, answer)
 	return nil
 }
-func (f *fakeRepo) Conversation(context.Context, int64, int64, time.Time) ([]model.HistoryEntry, error) {
+func (f *fakeRepo) Conversation(context.Context, int64, int64, int64, time.Time) ([]model.HistoryEntry, error) {
 	return f.history, nil
 }
 

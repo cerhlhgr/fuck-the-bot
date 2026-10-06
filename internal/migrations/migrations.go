@@ -91,7 +91,7 @@ func withLock(ctx context.Context, pool *pgxpool.Pool, action func(*pgxpool.Conn
 		defer cancel()
 		_, _ = conn.Exec(unlockCtx, `SELECT pg_advisory_unlock($1)`, advisoryLockKey)
 	}()
-	_, err = conn.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+	_, err = conn.Exec(ctx, `CREATE TABLE IF NOT EXISTS bot_schema_migrations (
 		version BIGINT PRIMARY KEY,
 		name TEXT NOT NULL,
 		applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -104,7 +104,7 @@ func withLock(ctx context.Context, pool *pgxpool.Pool, action func(*pgxpool.Conn
 
 func Up(ctx context.Context, pool *pgxpool.Pool) error {
 	return withLock(ctx, pool, func(conn *pgxpool.Conn, scripts []migration) error {
-		rows, err := conn.Query(ctx, `SELECT version FROM schema_migrations`)
+		rows, err := conn.Query(ctx, `SELECT version FROM bot_schema_migrations`)
 		if err != nil {
 			return err
 		}
@@ -137,7 +137,7 @@ func Up(ctx context.Context, pool *pgxpool.Pool) error {
 func Down(ctx context.Context, pool *pgxpool.Pool) error {
 	return withLock(ctx, pool, func(conn *pgxpool.Conn, scripts []migration) error {
 		var version int64
-		err := conn.QueryRow(ctx, `SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version)
+		err := conn.QueryRow(ctx, `SELECT version FROM bot_schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -163,9 +163,9 @@ func execute(ctx context.Context, conn *pgxpool.Conn, sql string, version int64,
 		return err
 	}
 	if up {
-		_, err = tx.Exec(ctx, `INSERT INTO schema_migrations (version, name) VALUES ($1, $2)`, version, name)
+		_, err = tx.Exec(ctx, `INSERT INTO bot_schema_migrations (version, name) VALUES ($1, $2)`, version, name)
 	} else {
-		_, err = tx.Exec(ctx, `DELETE FROM schema_migrations WHERE version = $1`, version)
+		_, err = tx.Exec(ctx, `DELETE FROM bot_schema_migrations WHERE version = $1`, version)
 	}
 	if err != nil {
 		return err

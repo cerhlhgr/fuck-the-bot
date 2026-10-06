@@ -133,15 +133,16 @@ func (s *Store) AddBotReply(ctx context.Context, chatID, threadID int64, usernam
 	return err
 }
 
-func (s *Store) Conversation(ctx context.Context, chatID, threadID int64, now time.Time) ([]model.HistoryEntry, error) {
+func (s *Store) Conversation(ctx context.Context, chatID, threadID, currentMessageID int64, now time.Time) ([]model.HistoryEntry, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	rows, err := s.pool.Query(queryCtx, `
 		SELECT sent_at, author, body
 		FROM bot_history
 		WHERE chat_id = $1 AND thread_id = $2 AND sent_at >= $3 AND sent_at <= $4
+			AND (message_id IS NULL OR message_id <> $5)
 		ORDER BY sent_at DESC, id DESC
-		LIMIT $5`, chatID, threadID, now.Add(-model.HistoryLifetime), now, model.MaxContextMessages)
+		LIMIT $6`, chatID, threadID, now.Add(-model.HistoryLifetime), now, currentMessageID, model.MaxContextMessages)
 	if err != nil {
 		return nil, err
 	}

@@ -63,7 +63,7 @@ type Repository interface {
 	Prune(context.Context, time.Time) error
 	AddIncoming(context.Context, Message, time.Time) error
 	AddBotReply(context.Context, int64, int64, string, string, time.Time) error
-	Conversation(context.Context, int64, int64, time.Time) ([]HistoryEntry, error)
+	Conversation(context.Context, int64, int64, int64, time.Time) ([]HistoryEntry, error)
 }
 
 func MentionedText(msg Message, username string) (string, bool) {

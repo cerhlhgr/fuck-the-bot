@@ -71,7 +71,7 @@ func (w *Worker) Process(ctx context.Context, item model.Update) error {
 	var prior []model.HistoryEntry
 	if mentioned {
 		var err error
-		prior, err = w.Repo.Conversation(ctx, msg.Chat.ID, msg.MessageThreadID, time.Now())
+		prior, err = w.Repo.Conversation(ctx, msg.Chat.ID, msg.MessageThreadID, msg.MessageID, time.Now())
 		if err != nil {
 			return fmt.Errorf("load conversation: %w", err)
 		}

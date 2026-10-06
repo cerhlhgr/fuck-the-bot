@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fuck-the-bot/internal/client/ai"
+	"fuck-the-bot/internal/client/images"
 	"fuck-the-bot/internal/client/telegram"
 	"fuck-the-bot/internal/controller"
 	"fuck-the-bot/internal/migrations"
@@ -85,7 +86,7 @@ func main() {
 
 	log.Printf("webhook listening on %s for @%s", cfg.listenAddr, me.Username)
 
-	worker := &controller.Worker{Repo: repo, AI: ai.New(cfg.aiKey, cfg.model), Telegram: tg, BotID: me.ID, Username: me.Username}
+	worker := &controller.Worker{Repo: repo, AI: ai.New(cfg.aiKey, cfg.model), Telegram: tg, Images: images.New(), BotID: me.ID, Username: me.Username}
 	var workers sync.WaitGroup
 	workers.Add(1)
 	go func() {

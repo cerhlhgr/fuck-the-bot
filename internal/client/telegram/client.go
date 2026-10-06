@@ -21,6 +21,18 @@ type Client struct {
 	token string
 }
 
+type replyParameters struct {
+	MessageID                int64 `json:"message_id"`
+	AllowSendingWithoutReply bool  `json:"allow_sending_without_reply"`
+}
+
+func replyTo(messageID int64) *replyParameters {
+	if messageID <= 0 {
+		return nil
+	}
+	return &replyParameters{MessageID: messageID, AllowSendingWithoutReply: true}
+}
+
 func New(token string) *Client {
 	return &Client{http: &http.Client{Timeout: 45 * time.Second}, token: token}
 }
@@ -63,24 +75,59 @@ func (c *Client) GetMe(ctx context.Context) (model.User, error) {
 func (c *Client) SendMessage(ctx context.Context, original model.Message, answer string) error {
 	for i, chunk := range view.TelegramChunks(answer) {
 		input := struct {
-			ChatID          int64  `json:"chat_id"`
-			Text            string `json:"text"`
-			MessageThreadID int64  `json:"message_thread_id,omitempty"`
-			ReplyParameters *struct {
-				MessageID                int64 `json:"message_id"`
-				AllowSendingWithoutReply bool  `json:"allow_sending_without_reply"`
-			} `json:"reply_parameters,omitempty"`
+			ChatID          int64            `json:"chat_id"`
+			Text            string           `json:"text"`
+			MessageThreadID int64            `json:"message_thread_id,omitempty"`
+			ReplyParameters *replyParameters `json:"reply_parameters,omitempty"`
 		}{ChatID: original.Chat.ID, Text: chunk, MessageThreadID: original.MessageThreadID}
 		if i == 0 {
-			input.ReplyParameters = &struct {
-				MessageID                int64 `json:"message_id"`
-				AllowSendingWithoutReply bool  `json:"allow_sending_without_reply"`
-			}{original.MessageID, true}
+			input.ReplyParameters = replyTo(original.MessageID)
 		}
 		var sent json.RawMessage
 		if err := c.call(ctx, "sendMessage", input, &sent); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (c *Client) SendPoll(ctx context.Context, original model.Message, poll model.Poll) error {
+	type pollOption struct {
+		Text string `json:"text"`
+	}
+	input := struct {
+		ChatID          int64            `json:"chat_id"`
+		MessageThreadID int64            `json:"message_thread_id,omitempty"`
+		Question        string           `json:"question"`
+		Options         []pollOption     `json:"options"`
+		ReplyParameters *replyParameters `json:"reply_parameters,omitempty"`
+	}{ChatID: original.Chat.ID, MessageThreadID: original.MessageThreadID, Question: poll.Question, ReplyParameters: replyTo(original.MessageID)}
+	for _, option := range poll.Options {
+		input.Options = append(input.Options, pollOption{Text: option})
+	}
+	var sent json.RawMessage
+	return c.call(ctx, "sendPoll", input, &sent)
+}
+
+func (c *Client) SetReaction(ctx context.Context, target model.Message, emoji string) error {
+	input := struct {
+		ChatID    int64 `json:"chat_id"`
+		MessageID int64 `json:"message_id"`
+		Reaction  []struct {
+			Type  string `json:"type"`
+			Emoji string `json:"emoji"`
+		} `json:"reaction"`
+	}{ChatID: target.Chat.ID, MessageID: target.MessageID}
+	input.Reaction = append(input.Reaction, struct {
+		Type  string `json:"type"`
+		Emoji string `json:"emoji"`
+	}{Type: "emoji", Emoji: emoji})
+	var ok bool
+	if err := c.call(ctx, "setMessageReaction", input, &ok); err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("Telegram did not confirm reaction")
 	}
 	return nil
 }

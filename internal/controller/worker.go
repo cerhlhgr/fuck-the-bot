@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"fuck-the-bot/internal/model"
@@ -16,12 +17,19 @@ type AI interface {
 
 type Messenger interface {
 	SendMessage(context.Context, model.Message, string) error
+	SendPoll(context.Context, model.Message, model.Poll) error
+	SetReaction(context.Context, model.Message, string) error
+}
+
+type ImageSearcher interface {
+	Search(context.Context, string) (string, error)
 }
 
 type Worker struct {
 	Repo     model.Repository
 	AI       AI
 	Telegram Messenger
+	Images   ImageSearcher
 	BotID    int64
 	Username string
 }
@@ -111,31 +119,90 @@ func (w *Worker) Process(ctx context.Context, item model.Update) error {
 		log.Printf("AI decision failed update_id=%d chat_id=%d duration=%s error=%v", item.UpdateID, msg.Chat.ID, time.Since(started), err)
 		return nil
 	}
-	if decision.Reply == "" {
+	action := decision.Action
+	if action == "" { // Older callers can still construct a decision without an explicit action.
+		switch {
+		case decision.Poll != nil:
+			action = "poll"
+		case decision.Reply != "":
+			action = "reply"
+		default:
+			action = "silence"
+		}
+	}
+	if action == "silence" {
 		log.Printf("AI chose silence update_id=%d chat_id=%d duration=%s", item.UpdateID, msg.Chat.ID, time.Since(started))
 		return nil
 	}
-	validTarget := false
-	for _, entry := range history {
-		if !entry.Bot && entry.MessageID == decision.ReplyToMessageID && entry.MessageID > 0 {
-			validTarget = true
-			break
+	if decision.ReplyToMessageID > 0 {
+		validTarget := false
+		for _, entry := range history {
+			if !entry.Bot && entry.MessageID == decision.ReplyToMessageID {
+				validTarget = true
+				break
+			}
 		}
-	}
-	if !validTarget {
+		if !validTarget {
+			log.Printf("AI selected invalid reply target update_id=%d chat_id=%d reply_to_message_id=%d", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID)
+			return nil
+		}
+	} else if action == "reply" || action == "reaction" || decision.ReplyToMessageID < 0 {
 		log.Printf("AI selected invalid reply target update_id=%d chat_id=%d reply_to_message_id=%d", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID)
 		return nil
 	}
-	log.Printf("AI chose reply update_id=%d chat_id=%d reply_to_message_id=%d duration=%s", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID, time.Since(started))
 	target := msg
 	target.MessageID = decision.ReplyToMessageID
-	if err := w.Telegram.SendMessage(ctx, target, decision.Reply); err != nil {
-		return fmt.Errorf("chat_id=%d message_id=%d send Telegram reply: %w", msg.Chat.ID, msg.MessageID, err)
+	var storedText string
+	log.Printf("AI chose action update_id=%d chat_id=%d action=%s reply_to_message_id=%d duration=%s", item.UpdateID, msg.Chat.ID, action, decision.ReplyToMessageID, time.Since(started))
+	switch action {
+	case "poll":
+		if decision.Poll == nil {
+			return fmt.Errorf("AI selected a poll without poll data")
+		}
+		log.Printf("AI chose poll update_id=%d chat_id=%d reply_to_message_id=%d duration=%s", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID, time.Since(started))
+		if err := w.Telegram.SendPoll(ctx, target, *decision.Poll); err != nil {
+			return fmt.Errorf("chat_id=%d message_id=%d send Telegram poll: %w", msg.Chat.ID, msg.MessageID, err)
+		}
+		storedText = "Опрос: " + decision.Poll.Question + "\nВарианты: " + strings.Join(decision.Poll.Options, "; ")
+		log.Printf("Telegram poll sent update_id=%d chat_id=%d reply_to_message_id=%d", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID)
+	case "reply", "message":
+		if err := w.Telegram.SendMessage(ctx, target, decision.Reply); err != nil {
+			return fmt.Errorf("chat_id=%d message_id=%d send Telegram message: %w", msg.Chat.ID, msg.MessageID, err)
+		}
+		storedText = decision.Reply
+		log.Printf("Telegram message sent update_id=%d chat_id=%d reply_to_message_id=%d", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID)
+	case "image":
+		if w.Images == nil {
+			return errors.New("image searcher is not configured")
+		}
+		imageURL, err := w.Images.Search(ctx, decision.ImageQuery)
+		if err != nil {
+			log.Printf("image search failed update_id=%d chat_id=%d error=%v", item.UpdateID, msg.Chat.ID, err)
+			storedText = "Картинку по запросу не нашёл."
+		} else {
+			storedText = strings.TrimSpace(decision.Caption)
+			if storedText != "" {
+				storedText += "\n"
+			}
+			storedText += imageURL
+		}
+		if err := w.Telegram.SendMessage(ctx, target, storedText); err != nil {
+			return fmt.Errorf("chat_id=%d message_id=%d send image link: %w", msg.Chat.ID, msg.MessageID, err)
+		}
+		log.Printf("Telegram image link sent update_id=%d chat_id=%d reply_to_message_id=%d", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID)
+	case "reaction":
+		if err := w.Telegram.SetReaction(ctx, target, decision.Reaction); err != nil {
+			log.Printf("Telegram reaction unavailable update_id=%d chat_id=%d reply_to_message_id=%d error=%v", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID, err)
+			return nil
+		}
+		storedText = "Реакция: " + decision.Reaction
+		log.Printf("Telegram reaction set update_id=%d chat_id=%d reply_to_message_id=%d", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID)
+	default:
+		return fmt.Errorf("unknown AI action %q", action)
 	}
-	log.Printf("Telegram reply sent update_id=%d chat_id=%d reply_to_message_id=%d", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID)
-	if err := w.Repo.AddBotReply(ctx, msg.Chat.ID, msg.MessageThreadID, decision.ReplyToMessageID, w.Username, decision.Reply, time.Now()); err != nil {
-		return fmt.Errorf("chat_id=%d message_id=%d save bot reply: %w", msg.Chat.ID, msg.MessageID, err)
+	if err := w.Repo.AddBotReply(ctx, msg.Chat.ID, msg.MessageThreadID, decision.ReplyToMessageID, w.Username, storedText, time.Now()); err != nil {
+		return fmt.Errorf("chat_id=%d message_id=%d save bot response: %w", msg.Chat.ID, msg.MessageID, err)
 	}
-	log.Printf("bot reply stored update_id=%d chat_id=%d", item.UpdateID, msg.Chat.ID)
+	log.Printf("bot response stored update_id=%d chat_id=%d", item.UpdateID, msg.Chat.ID)
 	return nil
 }

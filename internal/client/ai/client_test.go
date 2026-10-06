@@ -39,6 +39,6 @@ func TestAskSendsSystemPromptWithHistory(t *testing.T) {
 	})
 	answer, err := client.Ask(context.Background(), model.DecisionRequest{BotUsername: "MyBot", CurrentMessageID: 17, History: []model.HistoryEntry{{Date: time.Now(), MessageID: 17, Author: "@ivan", Text: "старое сообщение"}}})
 	if err != nil || answer.Reply != "Ну привет!" || answer.ReplyToMessageID != 17 {
-		t.Fatalf("answer = %q, %v", answer, err)
+		t.Fatalf("answer = %+v, %v", answer, err)
 	}
 }

@@ -60,8 +60,18 @@ type HistoryEntry struct {
 }
 
 type Decision struct {
+	Action           string
 	ReplyToMessageID int64
 	Reply            string
+	Poll             *Poll
+	ImageQuery       string
+	Caption          string
+	Reaction         string
+}
+
+type Poll struct {
+	Question string
+	Options  []string
 }
 
 type DecisionRequest struct {

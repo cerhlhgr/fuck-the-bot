@@ -42,7 +42,7 @@ func (c *Client) Ask(ctx context.Context, decisionRequest model.DecisionRequest)
 		struct {
 			Role    string `json:"role"`
 			Content string `json:"content"`
-		}{"user", "Реши, отвечать ли на новое сообщение, и верни JSON."},
+		}{"user", "Выбери уместное действие для нового сообщения по переписке и верни только JSON."},
 	)
 	body, err := json.Marshal(input)
 	if err != nil {

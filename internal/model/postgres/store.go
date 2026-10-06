@@ -116,7 +116,7 @@ func (s *Store) AddIncoming(ctx context.Context, msg model.Message, now time.Tim
 	defer cancel()
 	_, err := s.pool.Exec(queryCtx, `
 		INSERT INTO bot_history (chat_id, thread_id, message_id, reply_to_message_id, sent_at, author, body, bot)
-		VALUES ($1, $2, $3, NULLIF($4, 0), $5, $6, $7, FALSE)
+		VALUES ($1, $2, $3, NULLIF($4::bigint, 0), $5, $6, $7, FALSE)
 		ON CONFLICT (chat_id, message_id) DO NOTHING`,
 		msg.Chat.ID, msg.MessageThreadID, msg.MessageID, replyToMessageID, date, model.AuthorName(msg.From), content)
 	return err
@@ -130,7 +130,7 @@ func (s *Store) AddBotReply(ctx context.Context, chatID, threadID, replyToMessag
 	defer cancel()
 	_, err := s.pool.Exec(queryCtx, `
 		INSERT INTO bot_history (chat_id, thread_id, reply_to_message_id, sent_at, author, body, bot)
-		VALUES ($1, $2, $3, $4, $5, $6, TRUE)`,
+		VALUES ($1, $2, NULLIF($3::bigint, 0), $4, $5, $6, TRUE)`,
 		chatID, threadID, replyToMessageID, now, "@"+username, answer)
 	return err
 }

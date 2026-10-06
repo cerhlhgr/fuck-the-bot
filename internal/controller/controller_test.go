@@ -70,14 +70,40 @@ func (f *fakeAI) Ask(_ context.Context, request model.DecisionRequest) (model.De
 }
 
 type fakeTelegram struct {
-	messages []model.Message
-	answers  []string
+	messages        []model.Message
+	answers         []string
+	pollTargets     []model.Message
+	polls           []model.Poll
+	reactionTargets []model.Message
+	reactions       []string
 }
 
 func (f *fakeTelegram) SendMessage(_ context.Context, msg model.Message, answer string) error {
 	f.messages = append(f.messages, msg)
 	f.answers = append(f.answers, answer)
 	return nil
+}
+
+func (f *fakeTelegram) SendPoll(_ context.Context, msg model.Message, poll model.Poll) error {
+	f.pollTargets = append(f.pollTargets, msg)
+	f.polls = append(f.polls, poll)
+	return nil
+}
+
+func (f *fakeTelegram) SetReaction(_ context.Context, msg model.Message, emoji string) error {
+	f.reactionTargets = append(f.reactionTargets, msg)
+	f.reactions = append(f.reactions, emoji)
+	return nil
+}
+
+type fakeImageSearcher struct {
+	query string
+	url   string
+}
+
+func (f *fakeImageSearcher) Search(_ context.Context, query string) (string, error) {
+	f.query = query
+	return f.url, nil
 }
 
 func TestWebhookHandler(t *testing.T) {
@@ -145,6 +171,59 @@ func TestWorkerPassesReplyToBotToAI(t *testing.T) {
 	}
 }
 
+func TestWorkerSendsAndStoresPoll(t *testing.T) {
+	repo := &fakeRepo{}
+	ai := &fakeAI{decision: model.Decision{Poll: &model.Poll{Question: "Куда идём?", Options: []string{"В кино", "Домой"}}, ReplyToMessageID: 8}}
+	tg := &fakeTelegram{}
+	worker := Worker{Repo: repo, AI: ai, Telegram: tg, BotID: 99, Username: "MyBot"}
+	msg := model.Message{MessageID: 8, MessageThreadID: 29, Text: "Сделай опрос: куда идём?"}
+	msg.Chat.ID = -42
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 18, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(tg.messages) != 0 || len(tg.polls) != 1 || tg.polls[0].Question != "Куда идём?" || len(tg.pollTargets) != 1 || tg.pollTargets[0].MessageID != 8 || tg.pollTargets[0].MessageThreadID != 29 {
+		t.Fatalf("wrong Telegram action: %+v", tg)
+	}
+	if len(repo.botReplies) != 1 || !strings.Contains(repo.botReplies[0], "Куда идём?") || !strings.Contains(repo.botReplies[0], "В кино") || repo.replyTargets[0] != 8 {
+		t.Fatalf("poll was not stored in history: %+v", repo)
+	}
+}
+
+func TestWorkerHandlesImageReactionAndStandaloneMessage(t *testing.T) {
+	repo := &fakeRepo{}
+	ai := &fakeAI{}
+	tg := &fakeTelegram{}
+	images := &fakeImageSearcher{url: "https://upload.wikimedia.org/cat.jpg"}
+	worker := Worker{Repo: repo, AI: ai, Telegram: tg, Images: images, Username: "MyBot"}
+	msg := model.Message{MessageID: 8, MessageThreadID: 29, Text: "скинь кота"}
+	msg.Chat.ID = -42
+	item := model.Update{UpdateID: 20, Message: &msg}
+
+	ai.decision = model.Decision{Action: "image", ImageQuery: "cat", Caption: "Держи, блин", ReplyToMessageID: 8}
+	if err := worker.Process(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	if images.query != "cat" || len(tg.answers) != 1 || tg.answers[0] != "Держи, блин\nhttps://upload.wikimedia.org/cat.jpg" || tg.messages[0].MessageID != 8 || repo.botReplies[0] != tg.answers[0] {
+		t.Fatalf("image action was handled incorrectly: images=%+v tg=%+v repo=%+v", images, tg, repo)
+	}
+
+	ai.decision = model.Decision{Action: "reaction", Reaction: "🤡", ReplyToMessageID: 8}
+	if err := worker.Process(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	if len(tg.reactions) != 1 || tg.reactions[0] != "🤡" || tg.reactionTargets[0].MessageID != 8 || repo.botReplies[1] != "Реакция: 🤡" {
+		t.Fatalf("reaction action was handled incorrectly: tg=%+v repo=%+v", tg, repo)
+	}
+
+	ai.decision = model.Decision{Action: "message", Reply: "Всем привет"}
+	if err := worker.Process(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	if len(tg.answers) != 2 || tg.answers[1] != "Всем привет" || tg.messages[1].MessageID != 0 || repo.replyTargets[2] != 0 {
+		t.Fatalf("standalone message was handled incorrectly: tg=%+v repo=%+v", tg, repo)
+	}
+}
+
 func TestWorkerHonorsSilenceAndRejectsUnknownTarget(t *testing.T) {
 	repo := &fakeRepo{}
 	ai := &fakeAI{}
@@ -164,6 +243,13 @@ func TestWorkerHonorsSilenceAndRejectsUnknownTarget(t *testing.T) {
 	}
 	if len(tg.messages) != 0 {
 		t.Fatal("AI-selected unknown target was sent to Telegram")
+	}
+	ai.decision = model.Decision{Poll: &model.Poll{Question: "Куда?", Options: []string{"Туда", "Сюда"}}, ReplyToMessageID: 999}
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 19, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(tg.polls) != 0 {
+		t.Fatal("AI-selected poll with unknown target was sent to Telegram")
 	}
 }
 

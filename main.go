@@ -46,14 +46,17 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	log.Print("connecting to PostgreSQL")
 	pool, err := postgres.OpenPool(ctx, cfg.databaseURL)
 	if err != nil {
 		log.Fatalf("open PostgreSQL: %v", err)
 	}
 	defer pool.Close()
+	log.Print("PostgreSQL connected")
 	if err := migrations.Up(ctx, pool); err != nil {
 		log.Fatalf("apply migrations: %v", err)
 	}
+	log.Print("database migrations applied")
 	repo := postgres.New(pool)
 	if err := repo.Prune(ctx, time.Now()); err != nil {
 		log.Fatalf("prune old records: %v", err)
@@ -66,6 +69,7 @@ func main() {
 	if me.Username == "" {
 		log.Fatal("bot has no username")
 	}
+	log.Printf("Telegram bot authenticated username=@%s", me.Username)
 	listener, err := net.Listen("tcp", cfg.listenAddr)
 	if err != nil {
 		log.Fatalf("listen on %s: %v", cfg.listenAddr, err)

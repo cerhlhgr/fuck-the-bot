@@ -1,0 +1,9 @@
+{$WEBHOOK_DOMAIN} {
+    handle /telegram/webhook {
+        reverse_proxy bot:8080
+    }
+
+    handle {
+        respond 404
+    }
+}

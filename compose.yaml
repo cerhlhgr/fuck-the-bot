@@ -27,6 +27,24 @@ services:
       TIMEWEB_AI_API_KEY: ${TIMEWEB_AI_API_KEY:-}
       AI_MODEL: ${AI_MODEL:-deepseek/deepseek-v4-pro}
       DATABASE_URL: postgres://bot:bot-local@db:5432/bot?sslmode=disable
+      WEBHOOK_URL: https://${WEBHOOK_DOMAIN:-bot.example.com}/telegram/webhook
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+      LISTEN_ADDR: :8080
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      WEBHOOK_DOMAIN: ${WEBHOOK_DOMAIN:-bot.example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
 
 volumes:
   postgres_data:
+  caddy_data:
+  caddy_config:

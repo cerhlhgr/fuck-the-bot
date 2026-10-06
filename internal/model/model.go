@@ -1,0 +1,141 @@
+package model
+
+import (
+	"context"
+	"errors"
+	"strconv"
+	"strings"
+	"time"
+	"unicode/utf8"
+)
+
+const (
+	HistoryLifetime    = 24 * time.Hour
+	MaxSavedRunes      = 320
+	MaxContextMessages = 80
+)
+
+var ErrNoUpdates = errors.New("no queued updates")
+
+type User struct {
+	ID        int64  `json:"id"`
+	Username  string `json:"username"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+	IsBot     bool   `json:"is_bot"`
+}
+
+type Entity struct {
+	Type   string `json:"type"`
+	Offset int    `json:"offset"`
+	Length int    `json:"length"`
+}
+
+type Message struct {
+	MessageID       int64 `json:"message_id"`
+	MessageThreadID int64 `json:"message_thread_id"`
+	Date            int64 `json:"date"`
+	Chat            struct {
+		ID int64 `json:"id"`
+	} `json:"chat"`
+	From            *User    `json:"from"`
+	Text            string   `json:"text"`
+	Entities        []Entity `json:"entities"`
+	Caption         string   `json:"caption"`
+	CaptionEntities []Entity `json:"caption_entities"`
+}
+
+type Update struct {
+	UpdateID int64    `json:"update_id"`
+	Message  *Message `json:"message"`
+}
+
+type HistoryEntry struct {
+	Date   time.Time
+	Author string
+	Text   string
+}
+
+type Repository interface {
+	EnqueueUpdate(context.Context, Update, []byte) error
+	NextUpdate(context.Context) (Update, error)
+	MarkUpdateProcessed(context.Context, int64) error
+	Prune(context.Context, time.Time) error
+	AddIncoming(context.Context, Message, time.Time) error
+	AddBotReply(context.Context, int64, int64, string, string, time.Time) error
+	Conversation(context.Context, int64, int64, time.Time) ([]HistoryEntry, error)
+}
+
+func MentionedText(msg Message, username string) (string, bool) {
+	content, entities := msg.Text, msg.Entities
+	if content == "" {
+		content, entities = msg.Caption, msg.CaptionEntities
+	}
+	for _, e := range entities {
+		if e.Type != "mention" {
+			continue
+		}
+		start, end, ok := utf16ByteRange(content, e.Offset, e.Length)
+		if !ok || !strings.EqualFold(content[start:end], "@"+username) {
+			continue
+		}
+		text := strings.TrimSpace(content[:start] + content[end:])
+		if text == "" {
+			text = "Пользователь просто позвал тебя по имени. Ответь коротко."
+		}
+		return text, true
+	}
+	return "", false
+}
+
+func utf16ByteRange(s string, offset, length int) (int, int, bool) {
+	if offset < 0 || length <= 0 || offset > int(^uint(0)>>1)-length || !utf8.ValidString(s) {
+		return 0, 0, false
+	}
+	start, end, units := -1, -1, 0
+	for i, r := range s {
+		if units == offset {
+			start = i
+		}
+		if units == offset+length {
+			end = i
+		}
+		units += UTF16RuneLength(r)
+	}
+	if units == offset {
+		start = len(s)
+	}
+	if units == offset+length {
+		end = len(s)
+	}
+	return start, end, start >= 0 && end >= start
+}
+
+func UTF16RuneLength(r rune) int {
+	if r > 0xffff {
+		return 2
+	}
+	return 1
+}
+
+func AuthorName(u *User) string {
+	if u == nil {
+		return "Участник"
+	}
+	if u.Username != "" {
+		return "@" + u.Username
+	}
+	if name := strings.TrimSpace(u.FirstName + " " + u.LastName); name != "" {
+		return CompactText(name, 80)
+	}
+	return "user#" + strconv.FormatInt(u.ID, 10)
+}
+
+func CompactText(s string, limit int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	runes := []rune(s)
+	if len(runes) <= limit {
+		return s
+	}
+	return string(runes[:limit-1]) + "…"
+}

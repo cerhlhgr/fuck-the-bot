@@ -2,12 +2,18 @@
 
 Telegram отправляет сообщения на HTTPS webhook бота. Бот быстро сохраняет обновление в PostgreSQL, а затем обрабатывает его: хранит короткие тексты переписки за последние 24 часа и отвечает через Timeweb AI на упоминание своего `@username`. Контекст берётся только из того же чата и темы. Ответ ИИ ожидается в JSON вида `{"reply":"..."}` и публикуется реплаем.
 
-## Запуск на сервере через Docker Compose
+## Запуск в Timeweb App Platform
+
+Выберите фреймворк **Docker Compose** и файл `docker-compose.yml` из корня репозитория. В настройках приложения задайте `TELEGRAM_BOT_TOKEN`, `TIMEWEB_AI_API_KEY`, `DATABASE_URL`, `WEBHOOK_SECRET` и `WEBHOOK_DOMAIN`. В `WEBHOOK_DOMAIN` укажите публичный домен приложения из панели Timeweb без `https://`. Используется внешняя PostgreSQL из `DATABASE_URL`.
+
+В манифесте Timeweb есть только сервис `bot`: платформа проксирует его порт `8080` и обеспечивает HTTPS. Отдельный контейнер `migrate` не нужен — корневой `main.go` применяет миграции до запуска webhook. После обновления репозитория запустите новый деплой и убедитесь, что в списке контейнеров нет `migrate`.
+
+## Запуск на своём сервере через Docker Compose
 
 1. Создайте бота через [@BotFather](https://t.me/BotFather). Чтобы бот видел всю переписку группы, отключите **Group Privacy Mode** через `/setprivacy` или назначьте бота администратором. После изменения privacy mode удалите бота из группы и добавьте заново.
 2. Направьте DNS-запись `A` выбранного домена на публичный IPv4 сервера. Откройте входящие порты 80 и 443. Caddy в Compose сам получит HTTPS-сертификат.
 3. Скопируйте `.env.example` в `.env`. Заполните `TELEGRAM_BOT_TOKEN`, `TIMEWEB_AI_API_KEY`, `WEBHOOK_DOMAIN` и `WEBHOOK_SECRET`. Секрет можно создать командой `openssl rand -hex 32`; домен в `WEBHOOK_DOMAIN` указывайте без `https://`.
-4. Запустите `docker compose up -d --build`. Посмотрите журнал: `docker compose logs -f bot caddy`.
+4. Запустите `docker compose -f compose.yaml up -d --build`. Посмотрите журнал: `docker compose -f compose.yaml logs -f bot caddy`.
 
 5. После записи `webhook listening ... for @имя_бота` напишите в группе `@имя_бота привет`.
 
@@ -37,7 +43,7 @@ go run .
 
 ## Миграции и структура проекта
 
-Корневой `main.go` автоматически применяет миграции перед запуском webhook и обработки сообщений. Применить миграции отдельно: `DATABASE_URL='postgres://...' go run ./cmd/migrate up`. Откатить последнюю: `DATABASE_URL='postgres://...' go run ./cmd/migrate down`. Откат миграции `000001_initial` удаляет таблицы истории и очереди вместе с данными; при обычном запуске бот применяет только `up`.
+Корневой `main.go` автоматически применяет миграции перед запуском webhook и обработки сообщений. Отдельный контейнер или команда для миграций не требуются. SQL-файлы находятся в `internal/migrations/sql/`.
 
 - `internal/model/` — Telegram-сообщения, история и интерфейс хранилища; `internal/model/postgres/` — реализация модели в PostgreSQL.
 - `internal/controller/` — HTTP webhook и обработка очереди обновлений.

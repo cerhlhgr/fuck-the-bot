@@ -18,11 +18,17 @@ func TestHistoryPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { h.close() }()
+	defer func() {
+		if h != nil {
+			h.close()
+		}
+	}()
 	chatID := -time.Now().UnixNano()
 	otherChatID := chatID - 1
 	defer func() {
-		_, _ = h.pool.Exec(ctx, `DELETE FROM bot_history WHERE chat_id IN ($1, $2)`, chatID, otherChatID)
+		if h != nil {
+			_, _ = h.pool.Exec(ctx, `DELETE FROM bot_history WHERE chat_id IN ($1, $2)`, chatID, otherChatID)
+		}
 	}()
 	now := time.Now().UTC().Truncate(time.Second)
 
@@ -55,6 +61,7 @@ func TestHistoryPostgres(t *testing.T) {
 
 	// Reopen the pool to verify that the conversation survives a restart.
 	h.close()
+	h = nil
 	h, err = openHistoryStore(ctx, databaseURL)
 	if err != nil {
 		t.Fatal(err)

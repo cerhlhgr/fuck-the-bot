@@ -41,10 +41,7 @@ func (f *fakeRepo) MarkUpdateProcessed(context.Context, int64) error { return ni
 func (f *fakeRepo) Prune(context.Context, time.Time) error           { return nil }
 func (f *fakeRepo) AddIncoming(_ context.Context, msg model.Message, _ time.Time) error {
 	f.incoming = append(f.incoming, msg)
-	text := msg.Text
-	if text == "" {
-		text = msg.Caption
-	}
+	text := model.MessageHistoryText(msg)
 	f.history = append(f.history, model.HistoryEntry{MessageID: msg.MessageID, Text: text, Author: model.AuthorName(msg.From)})
 	return nil
 }
@@ -99,6 +96,27 @@ func (f *fakeTelegram) SetReaction(_ context.Context, msg model.Message, emoji s
 type fakeImageSearcher struct {
 	query string
 	url   string
+}
+
+type fakePhotoDownloader struct {
+	sizes []model.PhotoSize
+	data  []byte
+	err   error
+}
+
+func (f *fakePhotoDownloader) DownloadPhoto(_ context.Context, sizes []model.PhotoSize) ([]byte, error) {
+	f.sizes = sizes
+	return f.data, f.err
+}
+
+type fakePhotoAnalyzer struct {
+	data        []byte
+	description string
+}
+
+func (f *fakePhotoAnalyzer) DescribePhoto(_ context.Context, data []byte) (string, error) {
+	f.data = data
+	return f.description, nil
 }
 
 func (f *fakeImageSearcher) Search(_ context.Context, query string) (string, error) {
@@ -221,6 +239,36 @@ func TestWorkerHandlesImageReactionAndStandaloneMessage(t *testing.T) {
 	}
 	if len(tg.answers) != 2 || tg.answers[1] != "Всем привет" || tg.messages[1].MessageID != 0 || repo.replyTargets[2] != 0 {
 		t.Fatalf("standalone message was handled incorrectly: tg=%+v repo=%+v", tg, repo)
+	}
+}
+
+func TestWorkerAnalyzesIncomingPhotoBeforeDecision(t *testing.T) {
+	repo := &fakeRepo{}
+	ai := &fakeAI{}
+	photos := &fakePhotoDownloader{data: []byte("photo-data")}
+	vision := &fakePhotoAnalyzer{description: "кот сидит на диване"}
+	worker := Worker{Repo: repo, AI: ai, Telegram: &fakeTelegram{}, Photos: photos, Vision: vision, Username: "MyBot"}
+	msg := model.Message{MessageID: 31, Caption: "Что на фото?", Photo: []model.PhotoSize{{FileID: "photo-1", Width: 500, Height: 500}}}
+	msg.Chat.ID = -42
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 21, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(photos.sizes) != 1 || photos.sizes[0].FileID != "photo-1" || string(vision.data) != "photo-data" || len(repo.incoming) != 1 || repo.incoming[0].PhotoDescription != "кот сидит на диване" || len(ai.request.History) != 1 || ai.request.History[0].Text != "Что на фото?\n[На фото: кот сидит на диване]" {
+		t.Fatalf("photo was not added to decision context: photos=%+v vision=%+v incoming=%+v history=%+v", photos, vision, repo.incoming, ai.request.History)
+	}
+}
+
+func TestWorkerKeepsPhotoMessageWhenDownloadFails(t *testing.T) {
+	repo := &fakeRepo{}
+	ai := &fakeAI{}
+	worker := Worker{Repo: repo, AI: ai, Telegram: &fakeTelegram{}, Photos: &fakePhotoDownloader{err: errors.New("download failed")}, Vision: &fakePhotoAnalyzer{}, Username: "MyBot"}
+	msg := model.Message{MessageID: 32, Photo: []model.PhotoSize{{FileID: "photo-2"}}}
+	msg.Chat.ID = -42
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 22, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(ai.request.History) != 1 || ai.request.History[0].Text != "[Фото: содержимое недоступно для анализа]" {
+		t.Fatalf("photo fallback was not passed to AI: %+v", ai.request.History)
 	}
 }
 

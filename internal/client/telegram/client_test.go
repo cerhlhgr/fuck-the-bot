@@ -51,6 +51,39 @@ func TestSendReply(t *testing.T) {
 	}
 }
 
+func TestDownloadPhotoChoosesLargestAllowedSize(t *testing.T) {
+	client := New("test-token")
+	photo := []byte{0xff, 0xd8, 0xff, 0xe0, 0, 16}
+	client.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(req.URL.Path, "/getFile"):
+			var input struct {
+				FileID string `json:"file_id"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
+				t.Fatal(err)
+			}
+			if input.FileID != "medium" {
+				t.Fatalf("selected wrong size: %s", input.FileID)
+			}
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"ok":true,"result":{"file_path":"photos/test.jpg","file_size":6}}`))}, nil
+		case strings.HasSuffix(req.URL.Path, "/file/bottest-token/photos/test.jpg"):
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(photo)))}, nil
+		default:
+			t.Fatalf("unexpected Telegram method: %s", req.URL.Path)
+			return nil, nil
+		}
+	})
+	got, err := client.DownloadPhoto(context.Background(), []model.PhotoSize{
+		{FileID: "small", Width: 100, Height: 100, FileSize: 100},
+		{FileID: "medium", Width: 800, Height: 800, FileSize: 1000},
+		{FileID: "too-large", Width: 2000, Height: 2000, FileSize: maxPhotoBytes + 1},
+	})
+	if err != nil || string(got) != string(photo) {
+		t.Fatalf("photo = %v, %v", got, err)
+	}
+}
+
 func TestSendPoll(t *testing.T) {
 	client := New("test-token")
 	var sent bool

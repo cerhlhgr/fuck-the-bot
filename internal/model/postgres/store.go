@@ -94,13 +94,7 @@ func (s *Store) Prune(ctx context.Context, now time.Time) error {
 }
 
 func (s *Store) AddIncoming(ctx context.Context, msg model.Message, now time.Time) error {
-	content := msg.Text
-	if content == "" {
-		content = msg.Caption
-	}
-	if content == "" {
-		content = "[сообщение без текста]"
-	}
+	content := model.MessageHistoryText(msg)
 	date := time.Unix(msg.Date, 0)
 	if msg.Date == 0 || date.After(now) {
 		date = now

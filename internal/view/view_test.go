@@ -26,7 +26,7 @@ func TestConversationIncludesAllMessages(t *testing.T) {
 		t.Fatalf("history was truncated: count=%d", len(transcript))
 	}
 	prompt := SystemPrompt(model.DecisionRequest{BotUsername: "MyBot", CurrentMessageID: 85, History: entries})
-	if !strings.Contains(prompt, "последние 2 часа") || !strings.Contains(prompt, "message_id=85") || !strings.Contains(prompt, `"action":"silence"`) || !strings.Contains(prompt, `"action":"poll"`) || !strings.Contains(prompt, `"action":"image"`) || !strings.Contains(prompt, `"action":"reaction"`) {
+	if !strings.Contains(prompt, "последний час") || !strings.Contains(prompt, "message_id=85") || !strings.Contains(prompt, `"action":"silence"`) || !strings.Contains(prompt, `"action":"poll"`) || !strings.Contains(prompt, `"action":"image"`) || !strings.Contains(prompt, `"action":"reaction"`) {
 		t.Fatal("system prompt is missing the context or available actions")
 	}
 }

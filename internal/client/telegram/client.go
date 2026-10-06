@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 )
 
 const endpoint = "https://api.telegram.org/bot"
+const maxPhotoBytes = 5 << 20
 
 type Client struct {
 	http  *http.Client
@@ -70,6 +73,62 @@ func (c *Client) GetMe(ctx context.Context) (model.User, error) {
 	var me model.User
 	err := c.call(ctx, "getMe", struct{}{}, &me)
 	return me, err
+}
+
+func (c *Client) DownloadPhoto(ctx context.Context, sizes []model.PhotoSize) ([]byte, error) {
+	var chosen model.PhotoSize
+	var chosenPixels int64
+	for _, size := range sizes {
+		if size.FileID == "" || size.FileSize > maxPhotoBytes {
+			continue
+		}
+		pixels := int64(size.Width) * int64(size.Height)
+		if chosen.FileID == "" || pixels > chosenPixels {
+			chosen, chosenPixels = size, pixels
+		}
+	}
+	if chosen.FileID == "" {
+		return nil, fmt.Errorf("photo has no downloadable size up to %d bytes", maxPhotoBytes)
+	}
+	var file struct {
+		FilePath string `json:"file_path"`
+		FileSize int64  `json:"file_size"`
+	}
+	if err := c.call(ctx, "getFile", struct {
+		FileID string `json:"file_id"`
+	}{chosen.FileID}, &file); err != nil {
+		return nil, fmt.Errorf("get Telegram photo file: %w", err)
+	}
+	if file.FileSize > maxPhotoBytes {
+		return nil, fmt.Errorf("Telegram photo exceeds %d bytes", maxPhotoBytes)
+	}
+	if file.FilePath == "" || path.Clean(file.FilePath) != file.FilePath || strings.HasPrefix(file.FilePath, "/") || strings.ContainsAny(file.FilePath, "?#:") {
+		return nil, fmt.Errorf("Telegram returned an invalid photo path")
+	}
+	fileURL := url.URL{Scheme: "https", Host: "api.telegram.org", Path: "/file/bot" + c.token + "/" + file.FilePath}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download Telegram photo: %s", strings.ReplaceAll(err.Error(), c.token, "[redacted]"))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download Telegram photo: HTTP %d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxPhotoBytes {
+		return nil, fmt.Errorf("Telegram photo exceeds %d bytes", maxPhotoBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxPhotoBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read Telegram photo: %w", err)
+	}
+	if len(data) == 0 || len(data) > maxPhotoBytes {
+		return nil, fmt.Errorf("Telegram photo is empty or exceeds %d bytes", maxPhotoBytes)
+	}
+	return data, nil
 }
 
 func (c *Client) SendMessage(ctx context.Context, original model.Message, answer string) error {

@@ -11,7 +11,7 @@ import (
 
 const (
 	HistoryLifetime = 24 * time.Hour
-	ContextLifetime = 2 * time.Hour
+	ContextLifetime = time.Hour
 )
 
 var ErrNoUpdates = errors.New("no queued updates")
@@ -30,6 +30,13 @@ type Entity struct {
 	Length int    `json:"length"`
 }
 
+type PhotoSize struct {
+	FileID   string `json:"file_id"`
+	Width    int    `json:"width"`
+	Height   int    `json:"height"`
+	FileSize int64  `json:"file_size"`
+}
+
 type Message struct {
 	MessageID       int64 `json:"message_id"`
 	MessageThreadID int64 `json:"message_thread_id"`
@@ -37,12 +44,14 @@ type Message struct {
 	Chat            struct {
 		ID int64 `json:"id"`
 	} `json:"chat"`
-	From            *User    `json:"from"`
-	Text            string   `json:"text"`
-	Entities        []Entity `json:"entities"`
-	Caption         string   `json:"caption"`
-	CaptionEntities []Entity `json:"caption_entities"`
-	ReplyToMessage  *Message `json:"reply_to_message"`
+	From             *User       `json:"from"`
+	Text             string      `json:"text"`
+	Entities         []Entity    `json:"entities"`
+	Caption          string      `json:"caption"`
+	CaptionEntities  []Entity    `json:"caption_entities"`
+	Photo            []PhotoSize `json:"photo"`
+	PhotoDescription string      `json:"-"`
+	ReplyToMessage   *Message    `json:"reply_to_message"`
 }
 
 type Update struct {
@@ -155,6 +164,27 @@ func AuthorName(u *User) string {
 		return CompactText(name, 80)
 	}
 	return "user#" + strconv.FormatInt(u.ID, 10)
+}
+
+func MessageHistoryText(msg Message) string {
+	content := msg.Text
+	if content == "" {
+		content = msg.Caption
+	}
+	if len(msg.Photo) > 0 {
+		photoText := "[Фото: содержимое недоступно для анализа]"
+		if description := strings.TrimSpace(msg.PhotoDescription); description != "" {
+			photoText = "[На фото: " + description + "]"
+		}
+		if content != "" {
+			content += "\n"
+		}
+		content += photoText
+	}
+	if content == "" {
+		return "[сообщение без текста]"
+	}
+	return content
 }
 
 func CompactText(s string, limit int) string {

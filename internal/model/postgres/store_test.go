@@ -38,7 +38,7 @@ func TestPostgresHistoryAndInbox(t *testing.T) {
 	}()
 	now := time.Now().UTC().Truncate(time.Second)
 	longText := "Привет,\n как дела?" + strings.Repeat("Я", 400)
-	msg := model.Message{MessageID: 7, Date: now.Add(-time.Hour).Unix(), Text: longText, From: &model.User{Username: "ivan"}, ReplyToMessage: &model.Message{MessageID: 6}}
+	msg := model.Message{MessageID: 7, Date: now.Add(-30 * time.Minute).Unix(), Text: longText, From: &model.User{Username: "ivan"}, ReplyToMessage: &model.Message{MessageID: 6}}
 	msg.Chat.ID = chatID
 	if err := store.AddIncoming(ctx, msg, now); err != nil {
 		t.Fatal(err)

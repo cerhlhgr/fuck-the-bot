@@ -25,11 +25,21 @@ type ImageSearcher interface {
 	Search(context.Context, string) (string, error)
 }
 
+type PhotoDownloader interface {
+	DownloadPhoto(context.Context, []model.PhotoSize) ([]byte, error)
+}
+
+type PhotoAnalyzer interface {
+	DescribePhoto(context.Context, []byte) (string, error)
+}
+
 type Worker struct {
 	Repo     model.Repository
 	AI       AI
 	Telegram Messenger
 	Images   ImageSearcher
+	Photos   PhotoDownloader
+	Vision   PhotoAnalyzer
 	BotID    int64
 	Username string
 }
@@ -87,6 +97,19 @@ func (w *Worker) Process(ctx context.Context, item model.Update) error {
 	msg := *item.Message
 	now := time.Now()
 	log.Printf("message received update_id=%d chat_id=%d thread_id=%d message_id=%d", item.UpdateID, msg.Chat.ID, msg.MessageThreadID, msg.MessageID)
+	if len(msg.Photo) > 0 && (msg.From == nil || !msg.From.IsBot) && (msg.Date == 0 || !time.Unix(msg.Date, 0).Before(now.Add(-model.ContextLifetime))) {
+		log.Printf("photo analysis started update_id=%d chat_id=%d message_id=%d", item.UpdateID, msg.Chat.ID, msg.MessageID)
+		if w.Photos == nil || w.Vision == nil {
+			log.Printf("photo analysis unavailable update_id=%d reason=not_configured", item.UpdateID)
+		} else if photo, err := w.Photos.DownloadPhoto(ctx, msg.Photo); err != nil {
+			log.Printf("photo download failed update_id=%d chat_id=%d message_id=%d error=%v", item.UpdateID, msg.Chat.ID, msg.MessageID, err)
+		} else if description, err := w.Vision.DescribePhoto(ctx, photo); err != nil {
+			log.Printf("photo analysis failed update_id=%d chat_id=%d message_id=%d error=%v", item.UpdateID, msg.Chat.ID, msg.MessageID, err)
+		} else {
+			msg.PhotoDescription = description
+			log.Printf("photo analysis completed update_id=%d chat_id=%d message_id=%d", item.UpdateID, msg.Chat.ID, msg.MessageID)
+		}
+	}
 	if err := w.Repo.AddIncoming(ctx, msg, now); err != nil {
 		return fmt.Errorf("chat_id=%d message_id=%d save incoming message: %w", msg.Chat.ID, msg.MessageID, err)
 	}
@@ -96,7 +119,7 @@ func (w *Worker) Process(ctx context.Context, item model.Update) error {
 		return nil
 	}
 	if msg.Date != 0 && time.Unix(msg.Date, 0).Before(now.Add(-model.ContextLifetime)) {
-		log.Printf("AI decision skipped update_id=%d reason=message_older_than_two_hours", item.UpdateID)
+		log.Printf("AI decision skipped update_id=%d reason=message_older_than_one_hour", item.UpdateID)
 		return nil
 	}
 	history, err := w.Repo.Conversation(ctx, msg.Chat.ID, msg.MessageThreadID, now)

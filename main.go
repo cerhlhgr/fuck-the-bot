@@ -24,6 +24,7 @@ type config struct {
 	telegramToken string
 	aiKey         string
 	model         string
+	visionModel   string
 	databaseURL   string
 	listenAddr    string
 }
@@ -33,6 +34,7 @@ func main() {
 		telegramToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
 		aiKey:         os.Getenv("TIMEWEB_AI_API_KEY"),
 		model:         os.Getenv("AI_MODEL"),
+		visionModel:   os.Getenv("AI_VISION_MODEL"),
 		databaseURL:   os.Getenv("DATABASE_URL"),
 		listenAddr:    os.Getenv("LISTEN_ADDR"),
 	}
@@ -41,6 +43,9 @@ func main() {
 	}
 	if cfg.model == "" {
 		cfg.model = "deepseek/deepseek-v4-pro"
+	}
+	if cfg.visionModel == "" {
+		cfg.visionModel = "openai/gpt-4.1-mini"
 	}
 	if cfg.listenAddr == "" {
 		cfg.listenAddr = ":8080"
@@ -86,7 +91,8 @@ func main() {
 
 	log.Printf("webhook listening on %s for @%s", cfg.listenAddr, me.Username)
 
-	worker := &controller.Worker{Repo: repo, AI: ai.New(cfg.aiKey, cfg.model), Telegram: tg, Images: images.New(), BotID: me.ID, Username: me.Username}
+	aiClient := ai.New(cfg.aiKey, cfg.model, cfg.visionModel)
+	worker := &controller.Worker{Repo: repo, AI: aiClient, Telegram: tg, Images: images.New(), Photos: tg, Vision: aiClient, BotID: me.ID, Username: me.Username}
 	var workers sync.WaitGroup
 	workers.Add(1)
 	go func() {

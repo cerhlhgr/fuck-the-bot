@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -17,7 +18,7 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 func TestAskSendsSystemPromptWithHistory(t *testing.T) {
-	client := New("test-key", "deepseek/deepseek-v4-pro")
+	client := New("test-key", "deepseek/deepseek-v4-pro", "openai/gpt-4.1-mini")
 	client.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.String() != endpoint || req.Header.Get("Authorization") != "Bearer test-key" {
 			t.Fatalf("wrong endpoint or authorization")
@@ -40,5 +41,47 @@ func TestAskSendsSystemPromptWithHistory(t *testing.T) {
 	answer, err := client.Ask(context.Background(), model.DecisionRequest{BotUsername: "MyBot", CurrentMessageID: 17, History: []model.HistoryEntry{{Date: time.Now(), MessageID: 17, Author: "@ivan", Text: "старое сообщение"}}})
 	if err != nil || answer.Reply != "Ну привет!" || answer.ReplyToMessageID != 17 {
 		t.Fatalf("answer = %+v, %v", answer, err)
+	}
+}
+
+func TestDescribePhotoSendsImageToVisionModel(t *testing.T) {
+	client := New("test-key", "deepseek/deepseek-v4-pro", "openai/gpt-4.1-mini")
+	photo := []byte{0xff, 0xd8, 0xff, 0xe0, 0, 16}
+	client.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var input struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.Model != "openai/gpt-4.1-mini" || len(input.Messages) != 2 || input.Messages[1].Role != "user" {
+			t.Fatalf("wrong vision request: %+v", input)
+		}
+		var parts []struct {
+			Type     string `json:"type"`
+			ImageURL struct {
+				URL string `json:"url"`
+			} `json:"image_url"`
+		}
+		if err := json.Unmarshal(input.Messages[1].Content, &parts); err != nil {
+			t.Fatal(err)
+		}
+		if len(parts) != 2 || parts[0].Type != "text" || parts[1].Type != "image_url" || !strings.HasPrefix(parts[1].ImageURL.URL, "data:image/jpeg;base64,") {
+			t.Fatalf("photo missing from vision request: %+v", parts)
+		}
+		encoded := strings.TrimPrefix(parts[1].ImageURL.URL, "data:image/jpeg;base64,")
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil || string(decoded) != string(photo) {
+			t.Fatalf("wrong photo bytes: %v", err)
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"На фото кот."}}]}`))}, nil
+	})
+	got, err := client.DescribePhoto(context.Background(), photo)
+	if err != nil || got != "На фото кот." {
+		t.Fatalf("description = %q, %v", got, err)
 	}
 }

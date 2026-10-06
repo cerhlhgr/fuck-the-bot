@@ -8,12 +8,14 @@ Telegram отправляет сообщения на HTTPS webhook бота. Б
 
 В манифесте Timeweb есть только сервис `bot`: платформа проксирует его порт `8080` и обеспечивает HTTPS. Отдельный контейнер `migrate` не нужен — корневой `main.go` применяет миграции до запуска webhook. После обновления репозитория запустите новый деплой и убедитесь, что в списке контейнеров нет `migrate`.
 
+Если в логах нового деплоя всё ещё появляется `migrate-1`, проверьте подключённую ветку и выбранный фреймворк Docker Compose в настройках Timeweb. Такого сервиса нет в актуальном `docker-compose.yml`; значит деплой использует другую конфигурацию. Передайте поддержке Timeweb идентификатор ошибки из журнала и попросите удалить старый сервис `migrate` из конфигурации приложения.
+
 ## Запуск на своём сервере через Docker Compose
 
 1. Создайте бота через [@BotFather](https://t.me/BotFather). Чтобы бот видел всю переписку группы, отключите **Group Privacy Mode** через `/setprivacy` или назначьте бота администратором. После изменения privacy mode удалите бота из группы и добавьте заново.
 2. Направьте DNS-запись `A` выбранного домена на публичный IPv4 сервера. Откройте входящие порты 80 и 443. Caddy в Compose сам получит HTTPS-сертификат.
 3. Скопируйте `.env.example` в `.env`. Заполните `TELEGRAM_BOT_TOKEN`, `TIMEWEB_AI_API_KEY`, `WEBHOOK_DOMAIN` и `WEBHOOK_SECRET`. Секрет можно создать командой `openssl rand -hex 32`; домен в `WEBHOOK_DOMAIN` указывайте без `https://`.
-4. Запустите `docker compose -f compose.yaml up -d --build`. Посмотрите журнал: `docker compose -f compose.yaml logs -f bot caddy`.
+4. Запустите `docker compose -f compose.local.yaml up -d --build`. Посмотрите журнал: `docker compose -f compose.local.yaml logs -f bot caddy`.
 
 5. После записи `webhook listening ... for @имя_бота` напишите в группе `@имя_бота привет`.
 

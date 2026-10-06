@@ -23,14 +23,24 @@ func TestRegisterWebhookAndSendReply(t *testing.T) {
 		case strings.HasSuffix(req.URL.Path, "/setWebhook"):
 			var input struct {
 				URL            string   `json:"url"`
-				SecretToken    string   `json:"secret_token"`
 				AllowedUpdates []string `json:"allowed_updates"`
 				MaxConnections int      `json:"max_connections"`
 			}
-			if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
+			var payload map[string]json.RawMessage
+			if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
 				t.Fatal(err)
 			}
-			if input.URL != "https://bot.example.com/telegram/webhook" || input.SecretToken != "secret" || len(input.AllowedUpdates) != 1 || input.AllowedUpdates[0] != "message" || input.MaxConnections != 1 {
+			if _, exists := payload["secret_token"]; exists {
+				t.Fatal("setWebhook must not send a secret token")
+			}
+			data, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(data, &input); err != nil {
+				t.Fatal(err)
+			}
+			if input.URL != "https://bot.example.com/telegram/webhook" || len(input.AllowedUpdates) != 1 || input.AllowedUpdates[0] != "message" || input.MaxConnections != 1 {
 				t.Fatalf("wrong webhook config: %+v", input)
 			}
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"ok":true,"result":true}`))}, nil
@@ -55,7 +65,7 @@ func TestRegisterWebhookAndSendReply(t *testing.T) {
 			return nil, nil
 		}
 	})
-	if err := client.RegisterWebhook(context.Background(), "https://bot.example.com/telegram/webhook", "secret"); err != nil {
+	if err := client.RegisterWebhook(context.Background(), "https://bot.example.com/telegram/webhook"); err != nil {
 		t.Fatal(err)
 	}
 	msg := model.Message{MessageID: 17, MessageThreadID: 29}

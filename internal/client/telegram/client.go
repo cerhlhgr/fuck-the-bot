@@ -60,14 +60,13 @@ func (c *Client) GetMe(ctx context.Context) (model.User, error) {
 	return me, err
 }
 
-func (c *Client) RegisterWebhook(ctx context.Context, webhookURL, secret string) error {
+func (c *Client) RegisterWebhook(ctx context.Context, webhookURL string) error {
 	var registered bool
 	err := c.call(ctx, "setWebhook", struct {
 		URL            string   `json:"url"`
-		SecretToken    string   `json:"secret_token"`
 		AllowedUpdates []string `json:"allowed_updates"`
 		MaxConnections int      `json:"max_connections"`
-	}{webhookURL, secret, []string{"message"}, 1}, &registered)
+	}{webhookURL, []string{"message"}, 1}, &registered)
 	if err != nil {
 		return err
 	}

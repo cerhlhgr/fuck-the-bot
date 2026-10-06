@@ -25,7 +25,6 @@ type config struct {
 	model         string
 	databaseURL   string
 	webhookURL    string
-	webhookSecret string
 	listenAddr    string
 }
 
@@ -36,11 +35,10 @@ func main() {
 		model:         os.Getenv("AI_MODEL"),
 		databaseURL:   os.Getenv("DATABASE_URL"),
 		webhookURL:    os.Getenv("WEBHOOK_URL"),
-		webhookSecret: os.Getenv("WEBHOOK_SECRET"),
 		listenAddr:    os.Getenv("LISTEN_ADDR"),
 	}
-	if cfg.telegramToken == "" || cfg.aiKey == "" || cfg.databaseURL == "" || cfg.webhookURL == "" || cfg.webhookSecret == "" {
-		log.Fatal("set TELEGRAM_BOT_TOKEN, TIMEWEB_AI_API_KEY, DATABASE_URL, WEBHOOK_URL and WEBHOOK_SECRET")
+	if cfg.telegramToken == "" || cfg.aiKey == "" || cfg.databaseURL == "" {
+		log.Fatal("set TELEGRAM_BOT_TOKEN, TIMEWEB_AI_API_KEY and DATABASE_URL")
 	}
 	if cfg.model == "" {
 		cfg.model = "deepseek/deepseek-v4-pro"
@@ -48,8 +46,10 @@ func main() {
 	if cfg.listenAddr == "" {
 		cfg.listenAddr = ":8080"
 	}
-	if err := controller.ValidateWebhookConfig(cfg.webhookURL, cfg.webhookSecret); err != nil {
-		log.Fatalf("webhook configuration: %v", err)
+	if cfg.webhookURL != "" {
+		if err := controller.ValidateWebhookURL(cfg.webhookURL); err != nil {
+			log.Fatalf("webhook configuration: %v", err)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -78,7 +78,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen on %s: %v", cfg.listenAddr, err)
 	}
-	webhook := controller.NewWebhook(repo, cfg.webhookSecret)
+	webhook := controller.NewWebhook(repo)
 	server := &http.Server{Handler: webhook, ReadHeaderTimeout: 5 * time.Second}
 	serverErrors := make(chan error, 1)
 	go func() {
@@ -87,16 +87,20 @@ func main() {
 		}
 	}()
 
-	for ctx.Err() == nil {
-		if err := tg.RegisterWebhook(ctx, cfg.webhookURL, cfg.webhookSecret); err == nil {
-			break
-		} else {
-			log.Printf("setWebhook: %v; retrying in 5 seconds", err)
+	if cfg.webhookURL != "" {
+		for ctx.Err() == nil {
+			if err := tg.RegisterWebhook(ctx, cfg.webhookURL); err == nil {
+				break
+			} else {
+				log.Printf("setWebhook: %v; retrying in 5 seconds", err)
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
+			}
 		}
-		select {
-		case <-ctx.Done():
-		case <-time.After(5 * time.Second):
-		}
+	} else {
+		log.Print("WEBHOOK_URL is empty; register the public webhook URL with Telegram manually")
 	}
 	if ctx.Err() != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

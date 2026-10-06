@@ -72,33 +72,29 @@ func (f *fakeTelegram) SendMessage(_ context.Context, msg model.Message, answer 
 
 func TestWebhookHandler(t *testing.T) {
 	repo := &fakeRepo{}
-	handler := NewWebhook(repo, "test-secret")
-	request := func(method, secret, body string) int {
+	handler := NewWebhook(repo)
+	request := func(method, body string) int {
 		t.Helper()
 		req := httptest.NewRequest(method, WebhookPath, strings.NewReader(body))
-		req.Header.Set("X-Telegram-Bot-Api-Secret-Token", secret)
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, req)
 		return response.Code
 	}
-	if got := request(http.MethodPost, "wrong", `{"update_id":123}`); got != http.StatusForbidden {
-		t.Fatalf("wrong secret status = %d", got)
-	}
-	if got := request(http.MethodGet, "test-secret", ""); got != http.StatusMethodNotAllowed {
+	if got := request(http.MethodGet, ""); got != http.StatusMethodNotAllowed {
 		t.Fatalf("wrong method status = %d", got)
 	}
-	if got := request(http.MethodPost, "test-secret", "bad json"); got != http.StatusBadRequest {
+	if got := request(http.MethodPost, "bad json"); got != http.StatusBadRequest {
 		t.Fatalf("invalid JSON status = %d", got)
 	}
-	if got := request(http.MethodPost, "test-secret", strings.Repeat("x", maxBody+1)); got != http.StatusRequestEntityTooLarge {
+	if got := request(http.MethodPost, strings.Repeat("x", maxBody+1)); got != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized request status = %d", got)
 	}
 	repo.insertErr = errors.New("database down")
-	if got := request(http.MethodPost, "test-secret", `{"update_id":123}`); got != http.StatusServiceUnavailable {
+	if got := request(http.MethodPost, `{"update_id":123}`); got != http.StatusServiceUnavailable {
 		t.Fatalf("storage failure status = %d", got)
 	}
 	repo.insertErr = nil
-	if got := request(http.MethodPost, "test-secret", `{"update_id":123}`); got != http.StatusOK {
+	if got := request(http.MethodPost, `{"update_id":123}`); got != http.StatusOK {
 		t.Fatalf("valid request status = %d", got)
 	}
 	if len(repo.queued) != 1 || repo.queued[0].UpdateID != 123 || len(handler.Wake()) != 1 {
@@ -122,12 +118,12 @@ func TestWorkerProcessesMentionWithPriorConversation(t *testing.T) {
 	}
 }
 
-func TestValidateWebhookConfig(t *testing.T) {
-	if err := ValidateWebhookConfig("https://bot.example.com/telegram/webhook", "aB_123-z"); err != nil {
+func TestValidateWebhookURL(t *testing.T) {
+	if err := ValidateWebhookURL("https://bot.example.com/telegram/webhook"); err != nil {
 		t.Fatal(err)
 	}
 	for _, url := range []string{"http://bot.example.com/telegram/webhook", "https://bot.example.com/other", "https://bot.example.com:8080/telegram/webhook"} {
-		if err := ValidateWebhookConfig(url, "secret"); err == nil {
+		if err := ValidateWebhookURL(url); err == nil {
 			t.Errorf("accepted invalid webhook URL %q", url)
 		}
 	}

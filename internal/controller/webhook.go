@@ -1,14 +1,12 @@
 package controller
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"fuck-the-bot/internal/model"
 )
@@ -19,13 +17,12 @@ const (
 )
 
 type Webhook struct {
-	repo   model.Repository
-	secret string
-	wake   chan struct{}
+	repo model.Repository
+	wake chan struct{}
 }
 
-func NewWebhook(repo model.Repository, secret string) *Webhook {
-	return &Webhook{repo: repo, secret: secret, wake: make(chan struct{}, 1)}
+func NewWebhook(repo model.Repository) *Webhook {
+	return &Webhook{repo: repo, wake: make(chan struct{}, 1)}
 }
 
 func (h *Webhook) Wake() <-chan struct{} { return h.wake }
@@ -43,11 +40,6 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	provided := r.Header.Get("X-Telegram-Bot-Api-Secret-Token")
-	if subtle.ConstantTimeCompare([]byte(provided), []byte(h.secret)) != 1 {
-		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
@@ -75,21 +67,13 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func ValidateWebhookConfig(rawURL, secret string) error {
+func ValidateWebhookURL(rawURL string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.Path != WebhookPath || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return fmt.Errorf("WEBHOOK_URL must be an HTTPS URL ending in %s", WebhookPath)
 	}
 	if port := parsed.Port(); port != "" && port != "443" && port != "80" && port != "88" && port != "8443" {
 		return errors.New("WEBHOOK_URL uses a port Telegram does not support")
-	}
-	if len(secret) < 1 || len(secret) > 256 {
-		return errors.New("WEBHOOK_SECRET must contain 1-256 characters")
-	}
-	for _, r := range secret {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("_-", r)) {
-			return errors.New("WEBHOOK_SECRET may contain only letters, digits, _ and -")
-		}
 	}
 	return nil
 }

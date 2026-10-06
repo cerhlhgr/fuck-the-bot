@@ -8,7 +8,10 @@ Telegram отправляет сообщения на HTTPS webhook бота. Б
 2. Направьте DNS-запись `A` выбранного домена на публичный IPv4 сервера. Откройте входящие порты 80 и 443. Caddy в Compose сам получит HTTPS-сертификат.
 3. Скопируйте `.env.example` в `.env`. Заполните `TELEGRAM_BOT_TOKEN`, `TIMEWEB_AI_API_KEY`, `WEBHOOK_DOMAIN` и `WEBHOOK_SECRET`. Секрет можно создать командой `openssl rand -hex 32`; домен в `WEBHOOK_DOMAIN` указывайте без `https://`.
 4. Запустите `docker compose up -d --build`. Посмотрите журнал: `docker compose logs -f bot caddy`.
+
 5. После записи `webhook listening ... for @имя_бота` напишите в группе `@имя_бота привет`.
+
+Для внешней PostgreSQL укажите `DATABASE_URL` в `.env`. Контейнер бота использует этот адрес; локальная БД из Compose при этом запускается, но не используется.
 
 Бот сам вызывает `setWebhook` с адресом `https://<WEBHOOK_DOMAIN>/telegram/webhook` и секретом. Публичный HTTP-приёмник находится за Caddy; входящий запрос принимается только с верным заголовком `X-Telegram-Bot-Api-Secret-Token`. Long polling в этой версии не используется. Запускайте один экземпляр бота с одним Telegram-токеном.
 
@@ -27,19 +30,19 @@ export DATABASE_URL='postgres://bot:пароль@127.0.0.1:5432/bot?sslmode=disa
 export WEBHOOK_URL='https://bot.example.com/telegram/webhook'
 export WEBHOOK_SECRET='случайный_секрет'
 export LISTEN_ADDR=':8080' # необязательно
-go run ./cmd/bot
+go run .
 ```
 
 Публичный адрес должен использовать HTTPS. Telegram поддерживает для webhook порты 443, 80, 88 и 8443. Локальный HTTP-порт `8080` остаётся за reverse proxy.
 
 ## Миграции и структура проекта
 
-Применить миграции отдельно: `DATABASE_URL='postgres://...' go run ./cmd/migrate up`. Откатить последнюю: `DATABASE_URL='postgres://...' go run ./cmd/migrate down`. Откат миграции `000001_initial` удаляет таблицы истории и очереди вместе с данными; при обычном запуске бот применяет только `up`.
+Корневой `main.go` автоматически применяет миграции перед запуском webhook и обработки сообщений. Применить миграции отдельно: `DATABASE_URL='postgres://...' go run ./cmd/migrate up`. Откатить последнюю: `DATABASE_URL='postgres://...' go run ./cmd/migrate down`. Откат миграции `000001_initial` удаляет таблицы истории и очереди вместе с данными; при обычном запуске бот применяет только `up`.
 
 - `internal/model/` — Telegram-сообщения, история и интерфейс хранилища; `internal/model/postgres/` — реализация модели в PostgreSQL.
 - `internal/controller/` — HTTP webhook и обработка очереди обновлений.
 - `internal/view/` — текст системного промпта, формат переписки и разбиение ответов для Telegram.
-- `internal/client/` — клиенты Timeweb AI и Telegram Bot API; `cmd/bot/` — запуск и соединение компонентов.
+- `internal/client/` — клиенты Timeweb AI и Telegram Bot API; корневой `main.go` — запуск и соединение компонентов.
 
 ## Проверка
 

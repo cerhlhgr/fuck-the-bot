@@ -91,7 +91,7 @@ func TestDescribePhotoSendsImageToVisionModel(t *testing.T) {
 func TestAskLogsTokenUsageWithoutPromptContent(t *testing.T) {
 	client := New("test-key", "deepseek/deepseek-v4-pro", "openai/gpt-4.1-mini")
 	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"action\":\"silence\"}"}}],"usage":{"prompt_tokens":120,"completion_tokens":8,"total_tokens":128,"prompt_tokens_details":{"cached_tokens":60}}}`))}, nil
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"action\":\"silence\"}"}}],"usage":{"prompt_tokens":120,"completion_tokens":108,"total_tokens":228,"prompt_tokens_details":{"cached_tokens":60},"completion_tokens_details":{"reasoning_tokens":100}}}`))}, nil
 	})
 	var logs bytes.Buffer
 	previous := log.Writer()
@@ -102,7 +102,24 @@ func TestAskLogsTokenUsageWithoutPromptContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := logs.String()
-	if !strings.Contains(got, "purpose=decision") || !strings.Contains(got, "prompt_tokens=120") || !strings.Contains(got, "cache_hit_tokens=60") || strings.Contains(got, "private-message") {
+	if !strings.Contains(got, "purpose=decision") || !strings.Contains(got, "prompt_tokens=120") || !strings.Contains(got, "cache_hit_tokens=60") || !strings.Contains(got, "reasoning_tokens=100") || strings.Contains(got, "private-message") {
 		t.Fatalf("unexpected usage log: %s", got)
+	}
+}
+
+func TestAskLogsMissingReasoningUsage(t *testing.T) {
+	client := New("test-key", "deepseek/deepseek-v4-pro", "openai/gpt-4.1-mini")
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"action\":\"silence\"}"}}],"usage":{"prompt_tokens":120,"completion_tokens":8,"total_tokens":128}}`))}, nil
+	})
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(previous)
+	if _, err := client.Ask(context.Background(), model.DecisionRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "reasoning_tokens=unavailable") {
+		t.Fatalf("missing reasoning usage not logged: %s", logs.String())
 	}
 }

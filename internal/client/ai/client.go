@@ -129,6 +129,9 @@ func (c *Client) completion(ctx context.Context, input any, purpose, modelName s
 			PromptTokensDetails  *struct {
 				CachedTokens *int `json:"cached_tokens"`
 			} `json:"prompt_tokens_details"`
+			CompletionTokensDetails *struct {
+				ReasoningTokens *int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
@@ -144,11 +147,22 @@ func (c *Client) completion(ctx context.Context, input any, purpose, modelName s
 		if cached == nil && result.Usage.PromptTokensDetails != nil {
 			cached = result.Usage.PromptTokensDetails.CachedTokens
 		}
-		if cached == nil {
-			log.Printf("AI usage purpose=%s model=%s request_bytes=%d prompt_tokens=%d completion_tokens=%d total_tokens=%d cache_tokens=unavailable", purpose, modelName, requestBytes, result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens)
-		} else {
-			log.Printf("AI usage purpose=%s model=%s request_bytes=%d prompt_tokens=%d completion_tokens=%d total_tokens=%d cache_hit_tokens=%d", purpose, modelName, requestBytes, result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens, *cached)
+		reasoning := (*int)(nil)
+		if result.Usage.CompletionTokensDetails != nil {
+			reasoning = result.Usage.CompletionTokensDetails.ReasoningTokens
 		}
+		usage := fmt.Sprintf("AI usage purpose=%s model=%s request_bytes=%d prompt_tokens=%d completion_tokens=%d total_tokens=%d", purpose, modelName, requestBytes, result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens)
+		if cached == nil {
+			usage += " cache_tokens=unavailable"
+		} else {
+			usage += fmt.Sprintf(" cache_hit_tokens=%d", *cached)
+		}
+		if reasoning == nil {
+			usage += " reasoning_tokens=unavailable"
+		} else {
+			usage += fmt.Sprintf(" reasoning_tokens=%d", *reasoning)
+		}
+		log.Print(usage)
 	}
 	return strings.TrimSpace(result.Choices[0].Message.Content), nil
 }

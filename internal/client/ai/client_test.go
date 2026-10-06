@@ -1,10 +1,12 @@
 package ai
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"testing"
@@ -33,7 +35,7 @@ func TestAskSendsSystemPromptWithHistory(t *testing.T) {
 		if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
 			t.Fatal(err)
 		}
-		if input.Model != "deepseek/deepseek-v4-pro" || len(input.Messages) != 2 || input.Messages[0].Role != "system" || !strings.Contains(input.Messages[0].Content, `"text":"старое сообщение"`) || !strings.Contains(input.Messages[0].Content, "message_id=17") {
+		if input.Model != "deepseek/deepseek-v4-pro" || len(input.Messages) != 2 || input.Messages[0].Role != "system" || !strings.Contains(input.Messages[0].Content, `"старое сообщение"`) || !strings.Contains(input.Messages[0].Content, "message_id=17") {
 			t.Fatalf("wrong AI request: %+v", input)
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"reply\":\"Ну привет!\",\"reply_to_message_id\":17}"}}]}`))}, nil
@@ -83,5 +85,24 @@ func TestDescribePhotoSendsImageToVisionModel(t *testing.T) {
 	got, err := client.DescribePhoto(context.Background(), photo)
 	if err != nil || got != "На фото кот." {
 		t.Fatalf("description = %q, %v", got, err)
+	}
+}
+
+func TestAskLogsTokenUsageWithoutPromptContent(t *testing.T) {
+	client := New("test-key", "deepseek/deepseek-v4-pro", "openai/gpt-4.1-mini")
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"action\":\"silence\"}"}}],"usage":{"prompt_tokens":120,"completion_tokens":8,"total_tokens":128,"prompt_tokens_details":{"cached_tokens":60}}}`))}, nil
+	})
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(previous)
+	_, err := client.Ask(context.Background(), model.DecisionRequest{BotUsername: "MyBot", History: []model.HistoryEntry{{Text: "private-message"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := logs.String()
+	if !strings.Contains(got, "purpose=decision") || !strings.Contains(got, "prompt_tokens=120") || !strings.Contains(got, "cache_hit_tokens=60") || strings.Contains(got, "private-message") {
+		t.Fatalf("unexpected usage log: %s", got)
 	}
 }

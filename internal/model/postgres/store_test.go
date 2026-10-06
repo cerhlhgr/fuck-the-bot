@@ -33,6 +33,7 @@ func TestPostgresHistoryAndInbox(t *testing.T) {
 	otherChatID := chatID - 1
 	updateID := -chatID
 	defer func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM bot_important_context WHERE chat_id IN ($1, $2)`, chatID, otherChatID)
 		_, _ = pool.Exec(ctx, `DELETE FROM bot_history WHERE chat_id IN ($1, $2)`, chatID, otherChatID)
 		_, _ = pool.Exec(ctx, `DELETE FROM bot_updates WHERE update_id = $1`, updateID)
 	}()
@@ -63,6 +64,43 @@ func TestPostgresHistoryAndInbox(t *testing.T) {
 	otherChat.Chat.ID = otherChatID
 	if err := store.AddIncoming(ctx, otherChat, now); err != nil {
 		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		message model.Message
+		summary string
+		kind    string
+	}{
+		{older, "Старый важный факт", "fact"},
+		{older, "Старый важный факт", "fact"},
+		{otherTopic, "Факт другой темы", "instruction"},
+		{otherChat, "Факт другого чата", "fact"},
+	} {
+		if err := store.AddImportant(ctx, item.message, item.summary, item.kind, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	important, err := store.ImportantContext(ctx, chatID, 0)
+	if err != nil || len(important) != 1 || important[0].SourceMessageID != older.MessageID || important[0].Summary != "Старый важный факт" || important[0].Kind != "fact" {
+		t.Fatalf("important context crossed chat/topic boundaries or was duplicated: %+v, %v", important, err)
+	}
+	var storedSource string
+	if err := pool.QueryRow(ctx, `SELECT source_body FROM bot_important_context WHERE chat_id = $1 AND source_message_id = $2`, chatID, older.MessageID).Scan(&storedSource); err != nil || storedSource != older.Text {
+		t.Fatalf("full source message was not retained: text=%q error=%v", storedSource, err)
+	}
+	base := now.Add(-48 * time.Hour).Truncate(24 * time.Hour)
+	mute := model.Message{MessageID: 11, Date: base.Add(20 * time.Hour).Unix(), Text: "Бот, не пиши"}
+	mute.Chat.ID = chatID
+	unmute := model.Message{MessageID: 12, Date: base.Add(32 * time.Hour).Unix(), Text: "Бот, пиши"}
+	unmute.Chat.ID = chatID
+	if err := store.AddImportant(ctx, unmute, "Можно снова писать в чат", "instruction", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddImportant(ctx, mute, "Не писать в чат", "instruction", now); err != nil {
+		t.Fatal(err)
+	}
+	important, err = store.ImportantContext(ctx, chatID, 0)
+	if err != nil || len(important) != 3 || important[0].SourceMessageID != mute.MessageID || important[1].SourceMessageID != unmute.MessageID || important[0].Kind != "instruction" || important[1].Kind != "instruction" || !important[0].SourceDate.Before(important[1].SourceDate) {
+		t.Fatalf("instructions were not loaded in source time order: %+v, %v", important, err)
 	}
 	prior, err := store.Conversation(ctx, chatID, 0, now.Add(time.Second))
 	if err != nil {
@@ -106,5 +144,9 @@ func TestPostgresHistoryAndInbox(t *testing.T) {
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM bot_history WHERE chat_id = $1`, chatID).Scan(&count); err != nil || count != 4 {
 		t.Fatalf("expired row not pruned: %d, %v", count, err)
+	}
+	important, err = store.ImportantContext(ctx, chatID, 0)
+	if err != nil || len(important) != 3 || important[2].Summary != "Старый важный факт" {
+		t.Fatalf("important context was pruned: %+v, %v", important, err)
 	}
 }

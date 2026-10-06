@@ -68,8 +68,18 @@ type HistoryEntry struct {
 	Bot              bool
 }
 
+type ImportantEntry struct {
+	SourceMessageID int64
+	SourceDate      time.Time
+	Author          string
+	Summary         string
+	Kind            string
+}
+
 type Decision struct {
 	Action           string
+	Important        string
+	ImportantKind    string
 	ReplyToMessageID int64
 	Reply            string
 	Poll             *Poll
@@ -89,6 +99,7 @@ type DecisionRequest struct {
 	CurrentReplyToMessageID int64
 	CurrentRepliedToBot     bool
 	History                 []HistoryEntry
+	Important               []ImportantEntry
 }
 
 type Repository interface {
@@ -99,6 +110,8 @@ type Repository interface {
 	AddIncoming(context.Context, Message, time.Time) error
 	AddBotReply(context.Context, int64, int64, int64, string, string, time.Time) error
 	Conversation(context.Context, int64, int64, time.Time) ([]HistoryEntry, error)
+	ImportantContext(context.Context, int64, int64) ([]ImportantEntry, error)
+	AddImportant(context.Context, Message, string, string, time.Time) error
 }
 
 func MentionedText(msg Message, username string) (string, bool) {

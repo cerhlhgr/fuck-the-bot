@@ -154,3 +154,45 @@ func (s *Store) Conversation(ctx context.Context, chatID, threadID int64, now ti
 	}
 	return entries, nil
 }
+
+func (s *Store) AddImportant(ctx context.Context, msg model.Message, summary, kind string, now time.Time) error {
+	date := time.Unix(msg.Date, 0)
+	if msg.Date == 0 || date.After(now) {
+		date = now
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	_, err := s.pool.Exec(queryCtx, `
+		INSERT INTO bot_important_context
+		    (chat_id, thread_id, source_message_id, source_sent_at, author, source_body, summary, kind)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (chat_id, source_message_id) DO NOTHING`,
+		msg.Chat.ID, msg.MessageThreadID, msg.MessageID, date, model.AuthorName(msg.From), model.MessageHistoryText(msg), summary, kind)
+	return err
+}
+
+func (s *Store) ImportantContext(ctx context.Context, chatID, threadID int64) ([]model.ImportantEntry, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	rows, err := s.pool.Query(queryCtx, `
+		SELECT source_message_id, source_sent_at, author, summary, kind
+		FROM bot_important_context
+		WHERE chat_id = $1 AND thread_id = $2
+		ORDER BY source_sent_at ASC, source_message_id ASC, id ASC`, chatID, threadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []model.ImportantEntry
+	for rows.Next() {
+		var entry model.ImportantEntry
+		if err := rows.Scan(&entry.SourceMessageID, &entry.SourceDate, &entry.Author, &entry.Summary, &entry.Kind); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}

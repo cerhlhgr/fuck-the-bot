@@ -2,10 +2,12 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"fuck-the-bot/internal/model"
@@ -34,14 +36,50 @@ type PhotoAnalyzer interface {
 }
 
 type Worker struct {
-	Repo     model.Repository
-	AI       AI
-	Telegram Messenger
-	Images   ImageSearcher
-	Photos   PhotoDownloader
-	Vision   PhotoAnalyzer
-	BotID    int64
-	Username string
+	Repo       model.Repository
+	AI         AI
+	Telegram   Messenger
+	Images     ImageSearcher
+	Photos     PhotoDownloader
+	Vision     PhotoAnalyzer
+	BotID      int64
+	Username   string
+	photoMu    sync.Mutex
+	photoCache map[[32]byte]photoCacheEntry
+}
+
+const photoCacheLifetime = 24 * time.Hour
+const maxCachedPhotos = 1024
+
+type photoCacheEntry struct {
+	description string
+	createdAt   time.Time
+}
+
+func (w *Worker) cachedPhoto(hash [32]byte, now time.Time) (string, bool) {
+	w.photoMu.Lock()
+	defer w.photoMu.Unlock()
+	entry, ok := w.photoCache[hash]
+	return entry.description, ok && now.Sub(entry.createdAt) < photoCacheLifetime
+}
+
+func (w *Worker) rememberPhoto(hash [32]byte, description string, now time.Time) {
+	w.photoMu.Lock()
+	defer w.photoMu.Unlock()
+	if w.photoCache == nil {
+		w.photoCache = make(map[[32]byte]photoCacheEntry)
+	}
+	if _, exists := w.photoCache[hash]; !exists && len(w.photoCache) >= maxCachedPhotos {
+		var oldestHash [32]byte
+		var oldestTime time.Time
+		for key, entry := range w.photoCache {
+			if oldestTime.IsZero() || entry.createdAt.Before(oldestTime) {
+				oldestHash, oldestTime = key, entry.createdAt
+			}
+		}
+		delete(w.photoCache, oldestHash)
+	}
+	w.photoCache[hash] = photoCacheEntry{description: description, createdAt: now}
 }
 
 func (w *Worker) Run(ctx context.Context, wake <-chan struct{}) {
@@ -103,11 +141,18 @@ func (w *Worker) Process(ctx context.Context, item model.Update) error {
 			log.Printf("photo analysis unavailable update_id=%d reason=not_configured", item.UpdateID)
 		} else if photo, err := w.Photos.DownloadPhoto(ctx, msg.Photo); err != nil {
 			log.Printf("photo download failed update_id=%d chat_id=%d message_id=%d error=%v", item.UpdateID, msg.Chat.ID, msg.MessageID, err)
-		} else if description, err := w.Vision.DescribePhoto(ctx, photo); err != nil {
-			log.Printf("photo analysis failed update_id=%d chat_id=%d message_id=%d error=%v", item.UpdateID, msg.Chat.ID, msg.MessageID, err)
 		} else {
-			msg.PhotoDescription = description
-			log.Printf("photo analysis completed update_id=%d chat_id=%d message_id=%d", item.UpdateID, msg.Chat.ID, msg.MessageID)
+			hash := sha256.Sum256(photo)
+			if description, ok := w.cachedPhoto(hash, now); ok {
+				msg.PhotoDescription = description
+				log.Printf("photo analysis cache hit update_id=%d chat_id=%d message_id=%d", item.UpdateID, msg.Chat.ID, msg.MessageID)
+			} else if description, err := w.Vision.DescribePhoto(ctx, photo); err != nil {
+				log.Printf("photo analysis failed update_id=%d chat_id=%d message_id=%d error=%v", item.UpdateID, msg.Chat.ID, msg.MessageID, err)
+			} else {
+				msg.PhotoDescription = description
+				w.rememberPhoto(hash, description, now)
+				log.Printf("photo analysis completed update_id=%d chat_id=%d message_id=%d", item.UpdateID, msg.Chat.ID, msg.MessageID)
+			}
 		}
 	}
 	if err := w.Repo.AddIncoming(ctx, msg, now); err != nil {
@@ -126,21 +171,36 @@ func (w *Worker) Process(ctx context.Context, item model.Update) error {
 	if err != nil {
 		return fmt.Errorf("chat_id=%d message_id=%d load conversation: %w", msg.Chat.ID, msg.MessageID, err)
 	}
+	important, err := w.Repo.ImportantContext(ctx, msg.Chat.ID, msg.MessageThreadID)
+	if err != nil {
+		return fmt.Errorf("chat_id=%d message_id=%d load important context: %w", msg.Chat.ID, msg.MessageID, err)
+	}
 	request := model.DecisionRequest{
 		BotUsername:      w.Username,
 		CurrentMessageID: msg.MessageID,
 		History:          history,
+		Important:        important,
 	}
 	if msg.ReplyToMessage != nil {
 		request.CurrentReplyToMessageID = msg.ReplyToMessage.MessageID
 		request.CurrentRepliedToBot = w.BotID != 0 && msg.ReplyToMessage.From != nil && msg.ReplyToMessage.From.ID == w.BotID
 	}
-	log.Printf("AI decision started update_id=%d chat_id=%d context_messages=%d reply_to_bot=%t", item.UpdateID, msg.Chat.ID, len(history), request.CurrentRepliedToBot)
+	log.Printf("AI decision started update_id=%d chat_id=%d context_messages=%d important_entries=%d reply_to_bot=%t", item.UpdateID, msg.Chat.ID, len(history), len(important), request.CurrentRepliedToBot)
 	started := time.Now()
 	decision, err := w.AI.Ask(ctx, request)
 	if err != nil {
 		log.Printf("AI decision failed update_id=%d chat_id=%d duration=%s error=%v", item.UpdateID, msg.Chat.ID, time.Since(started), err)
 		return nil
+	}
+	if summary := strings.TrimSpace(decision.Important); summary != "" {
+		kind := decision.ImportantKind
+		if kind == "" {
+			kind = "fact"
+		}
+		if err := w.Repo.AddImportant(ctx, msg, summary, kind, now); err != nil {
+			return fmt.Errorf("chat_id=%d message_id=%d save important context: %w", msg.Chat.ID, msg.MessageID, err)
+		}
+		log.Printf("important context stored update_id=%d chat_id=%d thread_id=%d message_id=%d", item.UpdateID, msg.Chat.ID, msg.MessageThreadID, msg.MessageID)
 	}
 	action := decision.Action
 	if action == "" { // Older callers can still construct a decision without an explicit action.

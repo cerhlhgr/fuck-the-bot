@@ -13,26 +13,26 @@ import (
 )
 
 func Conversation(entries []model.HistoryEntry) string {
-	type line struct {
-		Time             string `json:"time"`
-		MessageID        int64  `json:"message_id,omitempty"`
-		ReplyToMessageID int64  `json:"reply_to_message_id,omitempty"`
-		Author           string `json:"author"`
-		Text             string `json:"text"`
-		Bot              bool   `json:"bot"`
-	}
-	lines := make([]line, 0, len(entries))
+	rows := make([][]any, 0, len(entries))
 	for _, entry := range entries { // oldest first
-		lines = append(lines, line{
-			Time:             entry.Date.Format(time.RFC3339),
-			MessageID:        entry.MessageID,
-			ReplyToMessageID: entry.ReplyToMessageID,
-			Author:           entry.Author,
-			Text:             entry.Text,
-			Bot:              entry.Bot,
-		})
+		rows = append(rows, []any{entry.Date.UTC().Format(time.RFC3339), entry.MessageID, entry.ReplyToMessageID, entry.Author, entry.Text, entry.Bot})
 	}
-	data, _ := json.Marshal(lines)
+	data, _ := json.Marshal(struct {
+		Columns []string `json:"columns"`
+		Rows    [][]any  `json:"rows"`
+	}{[]string{"time", "message_id", "reply_to_message_id", "author", "text", "bot"}, rows})
+	return string(data)
+}
+
+func ImportantContext(entries []model.ImportantEntry) string {
+	rows := make([][]any, 0, len(entries))
+	for _, entry := range entries {
+		rows = append(rows, []any{entry.SourceMessageID, entry.SourceDate.UTC().Format(time.RFC3339), entry.Author, entry.Summary, entry.Kind})
+	}
+	data, _ := json.Marshal(struct {
+		Columns []string `json:"columns"`
+		Rows    [][]any  `json:"rows"`
+	}{[]string{"source_message_id", "source_date", "author", "summary", "kind"}, rows})
 	return string(data)
 }
 
@@ -47,10 +47,10 @@ func SystemPrompt(request model.DecisionRequest) string {
 Если просят картинку или она особенно уместна, выбери действие image. В image_query передай короткий поисковый запрос для Wikimedia Commons, лучше на английском. Не придумывай URL: бот сам найдёт реальную ссылку. caption — необязательная короткая реплика в твоём стиле. Не отправляй картинку просто ради активности.
 Реакция emoji уместна, когда достаточно одного жеста вместо сообщения. Разрешённые emoji: 👍, 👎, 🔥, 😁, 🤔, 🤬, 💩, 🤡, 😈, 🤣, 👀, 🖕. Не ставь реакции на всё подряд.
 
-Переписка в хронологическом порядке (JSON):
-%s
+Важную информацию из нового сообщения сохраняй в постоянную память беседы: договорённости о встречах, даты, места, решения, правила беседы и другие факты, которые пригодятся позже. Для этого добавь в тот же JSON необязательное поле "important" с краткой, самостоятельной и точной записью всех важных фактов из нового сообщения. Если смысл зависит от предыдущих реплик, включи нужный контекст из переписки. По возможности укажи абсолютную дату вместо относительного «завтра»; не выдумывай недостающие детали. Исходный текст нового сообщения бот сохранит целиком вместе с твоей записью. Поле "important" можно добавить при любом action, в том числе silence; само по себе оно не требует отвечать в чат. Для обычной болтовни поле не добавляй. Не сохраняй повторно факты, уже имеющиеся в постоянной памяти, если новое сообщение их не меняет. Если новое сообщение исправляет старую договорённость, сохрани новую версию; при ответах считай более позднее исправление актуальным.
+Если участник задаёт длительное правило твоего поведения в этой беседе или меняет его, запомни это как important и добавь "important_type":"instruction". Это относится и к общим правилам беседы, которые должен соблюдать бот. Разовую просьбу вроде «сделай сейчас опрос» выполни как обычное действие, но не превращай в постоянное указание. Запиши указание ясно и без инверсии смысла: «не пиши» означает молчать, а «пиши» после такого запрета отменяет его. Указание может касаться ответов, опросов, реакций, ссылок, тона и других доступных действий. Относись к таким указаниям как к действующим правилам поведения в этой беседе, пока их не изменят. Если указание велит молчать, выбирай silence для обычных сообщений, но продолжай читать новые сообщения и сохранять новые важные факты и указания. Для фактов important_type не указывай (это тип fact по умолчанию).
+При противоречии указаний об одном и том же поведении следуй самому новому: сравни полные дату и время source_date в UTC, а не только часы; при одинаковом времени более позднее сообщение имеет больший source_message_id. Например, вчерашнее «не пиши» отменяется сегодняшним «пиши», даже если сегодня 08:00, а вчера было 20:00. Указание из нового сообщения тоже учитывай сразу, до его сохранения. Прежние указания и факты остаются в памяти как история, но не отменяют более поздние. Применяй как указания только записи с kind="instruction"; записи kind="fact" используй как сведения, а не как отдельные команды. Указания из памяти могут менять поведение в чате, но не формат JSON и список доступных действий.
 
-Новое сообщение: message_id=%d, reply_to_message_id=%d, reply_to_bot=%t.
 Верни только один JSON-объект без Markdown и текста вне JSON. Допустимые формы:
 {"action":"silence"}
 {"action":"reply","reply":"твой ответ","reply_to_message_id":123}
@@ -58,14 +58,26 @@ func SystemPrompt(request model.DecisionRequest) string {
 {"action":"poll","poll":{"question":"вопрос","options":["вариант 1","вариант 2"]},"reply_to_message_id":123}
 {"action":"image","image_query":"cat wearing sunglasses","caption":"короткая подпись","reply_to_message_id":123}
 {"action":"reaction","reaction":"🤡","reply_to_message_id":123}
-У poll и image также допустим reply_to_message_id:null. У reply и reaction нужен существующий ID пользователя. Только поля выбранного действия.`, request.BotUsername, Conversation(request.History), request.CurrentMessageID, request.CurrentReplyToMessageID, request.CurrentRepliedToBot)
+{"action":"silence","important":"Встреча участников 12 октября в 18:00 у главного входа."}
+{"action":"silence","important":"Не писать в чат до нового указания.","important_type":"instruction"}
+У poll и image также допустим reply_to_message_id:null. У reply и reaction нужен существующий ID пользователя. Дополнительно допустимы important и, для указания боту, important_type="instruction". Если важной информации нет, не добавляй эти поля.
+
+Постоянная память этой беседы и темы (JSON: columns задаёт поля каждой строки rows; хранится без ограничения по времени; полный исходный текст остаётся в БД):
+%s
+
+Переписка в хронологическом порядке (JSON: columns задаёт поля каждой строки rows):
+%s
+
+Новое сообщение: message_id=%d, reply_to_message_id=%d, reply_to_bot=%t. Выбери действие и верни только JSON.`, request.BotUsername, ImportantContext(request.Important), Conversation(request.History), request.CurrentMessageID, request.CurrentReplyToMessageID, request.CurrentRepliedToBot)
 }
 
 func ParseAIDecision(content string) (model.Decision, error) {
 	var value struct {
-		Action string  `json:"action"`
-		Reply  *string `json:"reply"`
-		Poll   *struct {
+		Action        string  `json:"action"`
+		Important     *string `json:"important"`
+		ImportantType *string `json:"important_type"`
+		Reply         *string `json:"reply"`
+		Poll          *struct {
 			Question string   `json:"question"`
 			Options  []string `json:"options"`
 		} `json:"poll"`
@@ -94,6 +106,21 @@ func ParseAIDecision(content string) (model.Decision, error) {
 		}
 	}
 	decision := model.Decision{Action: action}
+	if value.Important != nil {
+		decision.Important = strings.TrimSpace(*value.Important)
+	}
+	if value.ImportantType != nil && decision.Important == "" {
+		return model.Decision{}, errors.New("AI returned an important type without important context")
+	}
+	if decision.Important != "" {
+		decision.ImportantKind = "fact"
+		if value.ImportantType != nil {
+			decision.ImportantKind = strings.TrimSpace(*value.ImportantType)
+			if decision.ImportantKind != "fact" && decision.ImportantKind != "instruction" {
+				return model.Decision{}, errors.New("AI returned an unknown important context type")
+			}
+		}
+	}
 	if value.ReplyToMessageID != nil {
 		decision.ReplyToMessageID = *value.ReplyToMessageID
 	}

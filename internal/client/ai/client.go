@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -47,7 +48,7 @@ func (c *Client) Ask(ctx context.Context, decisionRequest model.DecisionRequest)
 			Content string `json:"content"`
 		}{"user", "Выбери уместное действие для нового сообщения по переписке и верни только JSON."},
 	)
-	content, err := c.completion(ctx, input)
+	content, err := c.completion(ctx, input, "decision", c.model)
 	if err != nil {
 		return model.Decision{}, err
 	}
@@ -83,7 +84,7 @@ func (c *Client) DescribePhoto(ctx context.Context, photo []byte) (string, error
 			map[string]any{"type": "image_url", "image_url": map[string]string{"url": dataURL}},
 		}},
 	)
-	answer, err := c.completion(ctx, input)
+	answer, err := c.completion(ctx, input, "vision", c.visionModel)
 	if err != nil {
 		return "", err
 	}
@@ -94,11 +95,12 @@ func (c *Client) DescribePhoto(ctx context.Context, photo []byte) (string, error
 	return answer, nil
 }
 
-func (c *Client) completion(ctx context.Context, input any) (string, error) {
+func (c *Client) completion(ctx context.Context, input any, purpose, modelName string) (string, error) {
 	body, err := json.Marshal(input)
 	if err != nil {
 		return "", err
 	}
+	requestBytes := len(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return "", err
@@ -119,12 +121,34 @@ func (c *Client) completion(ctx context.Context, input any) (string, error) {
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage *struct {
+			PromptTokens         int  `json:"prompt_tokens"`
+			CompletionTokens     int  `json:"completion_tokens"`
+			TotalTokens          int  `json:"total_tokens"`
+			PromptCacheHitTokens *int `json:"prompt_cache_hit_tokens"`
+			PromptTokensDetails  *struct {
+				CachedTokens *int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+		} `json:"usage"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
 		return "", err
 	}
 	if len(result.Choices) == 0 {
 		return "", errors.New("AI returned no choices")
+	}
+	if result.Usage == nil {
+		log.Printf("AI usage unavailable purpose=%s model=%s request_bytes=%d", purpose, modelName, requestBytes)
+	} else {
+		cached := result.Usage.PromptCacheHitTokens
+		if cached == nil && result.Usage.PromptTokensDetails != nil {
+			cached = result.Usage.PromptTokensDetails.CachedTokens
+		}
+		if cached == nil {
+			log.Printf("AI usage purpose=%s model=%s request_bytes=%d prompt_tokens=%d completion_tokens=%d total_tokens=%d cache_tokens=unavailable", purpose, modelName, requestBytes, result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens)
+		} else {
+			log.Printf("AI usage purpose=%s model=%s request_bytes=%d prompt_tokens=%d completion_tokens=%d total_tokens=%d cache_hit_tokens=%d", purpose, modelName, requestBytes, result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens, *cached)
+		}
 	}
 	return strings.TrimSpace(result.Choices[0].Message.Content), nil
 }

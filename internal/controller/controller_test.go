@@ -14,12 +14,15 @@ import (
 )
 
 type fakeRepo struct {
-	queued       []model.Update
-	insertErr    error
-	incoming     []model.Message
-	botReplies   []string
-	replyTargets []int64
-	history      []model.HistoryEntry
+	queued              []model.Update
+	insertErr           error
+	incoming            []model.Message
+	botReplies          []string
+	replyTargets        []int64
+	history             []model.HistoryEntry
+	important           []model.ImportantEntry
+	importantSourceText string
+	importantErr        error
 }
 
 func (f *fakeRepo) EnqueueUpdate(_ context.Context, item model.Update, _ []byte) error {
@@ -52,6 +55,22 @@ func (f *fakeRepo) AddBotReply(_ context.Context, _, _, replyToMessageID int64, 
 }
 func (f *fakeRepo) Conversation(context.Context, int64, int64, time.Time) ([]model.HistoryEntry, error) {
 	return f.history, nil
+}
+func (f *fakeRepo) ImportantContext(context.Context, int64, int64) ([]model.ImportantEntry, error) {
+	return f.important, nil
+}
+func (f *fakeRepo) AddImportant(_ context.Context, msg model.Message, summary, kind string, now time.Time) error {
+	if f.importantErr != nil {
+		return f.importantErr
+	}
+	for _, entry := range f.important {
+		if entry.SourceMessageID == msg.MessageID {
+			return nil
+		}
+	}
+	f.importantSourceText = model.MessageHistoryText(msg)
+	f.important = append(f.important, model.ImportantEntry{SourceMessageID: msg.MessageID, SourceDate: now, Author: model.AuthorName(msg.From), Summary: summary, Kind: kind})
+	return nil
 }
 
 type fakeAI struct {
@@ -112,10 +131,12 @@ func (f *fakePhotoDownloader) DownloadPhoto(_ context.Context, sizes []model.Pho
 type fakePhotoAnalyzer struct {
 	data        []byte
 	description string
+	calls       int
 }
 
 func (f *fakePhotoAnalyzer) DescribePhoto(_ context.Context, data []byte) (string, error) {
 	f.data = data
+	f.calls++
 	return f.description, nil
 }
 
@@ -168,6 +189,56 @@ func TestWorkerLetsAIChooseEarlierMessage(t *testing.T) {
 	}
 	if ai.calls != 1 || ai.request.CurrentMessageID != 7 || len(ai.request.History) != 2 || ai.request.History[1].Text != "что думаешь?" || len(tg.messages) != 1 || tg.messages[0].MessageID != 5 || tg.messages[0].Chat.ID != -42 || len(repo.replyTargets) != 1 || repo.replyTargets[0] != 5 {
 		t.Fatalf("unexpected decision handling: ai=%+v sent=%+v targets=%+v", ai, tg.messages, repo.replyTargets)
+	}
+}
+
+func TestWorkerStoresImportantContextEvenWhenSilent(t *testing.T) {
+	repo := &fakeRepo{}
+	ai := &fakeAI{decision: model.Decision{Action: "silence", Important: "Встреча в пятницу в 19:00 у входа."}}
+	tg := &fakeTelegram{}
+	worker := Worker{Repo: repo, AI: ai, Telegram: tg, Username: "MyBot"}
+	msg := model.Message{MessageID: 41, Text: "Встречаемся в пятницу в 19 у входа", From: &model.User{Username: "ivan"}}
+	msg.Chat.ID = -42
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 41, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.important) != 1 || repo.importantSourceText != msg.Text || repo.important[0].Summary != ai.decision.Important || len(tg.messages) != 0 {
+		t.Fatalf("important silence was not stored correctly: memory=%+v sent=%+v", repo.important, tg.messages)
+	}
+	msg.MessageID = 42
+	msg.Text = "Во сколько встреча?"
+	ai.decision = model.Decision{Action: "silence"}
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 42, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(ai.request.Important) != 1 || ai.request.Important[0].Summary != "Встреча в пятницу в 19:00 у входа." {
+		t.Fatalf("important context was not passed to AI: %+v", ai.request.Important)
+	}
+}
+
+func TestWorkerStoresInstructionInPermanentContext(t *testing.T) {
+	repo := &fakeRepo{}
+	ai := &fakeAI{decision: model.Decision{Action: "silence", Important: "Не писать в чат до нового указания", ImportantKind: "instruction"}}
+	worker := Worker{Repo: repo, AI: ai, Telegram: &fakeTelegram{}, Username: "MyBot"}
+	msg := model.Message{MessageID: 43, Text: "Бот, не пиши"}
+	msg.Chat.ID = -42
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 43, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.important) != 1 || repo.important[0].Kind != "instruction" || repo.important[0].Summary != ai.decision.Important {
+		t.Fatalf("bot instruction was not stored: %+v", repo.important)
+	}
+}
+
+func TestWorkerDoesNotSendActionWhenImportantContextSaveFails(t *testing.T) {
+	repo := &fakeRepo{importantErr: errors.New("database down")}
+	ai := &fakeAI{decision: model.Decision{Action: "reply", Reply: "Принято", ReplyToMessageID: 41, Important: "Правило беседы"}}
+	tg := &fakeTelegram{}
+	worker := Worker{Repo: repo, AI: ai, Telegram: tg, Username: "MyBot"}
+	msg := model.Message{MessageID: 41, Text: "Новое правило беседы"}
+	msg.Chat.ID = -42
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 41, Message: &msg}); err == nil || len(tg.messages) != 0 {
+		t.Fatalf("save failure should stop action before sending: err=%v sent=%+v", err, tg.messages)
 	}
 }
 
@@ -255,6 +326,24 @@ func TestWorkerAnalyzesIncomingPhotoBeforeDecision(t *testing.T) {
 	}
 	if len(photos.sizes) != 1 || photos.sizes[0].FileID != "photo-1" || string(vision.data) != "photo-data" || len(repo.incoming) != 1 || repo.incoming[0].PhotoDescription != "кот сидит на диване" || len(ai.request.History) != 1 || ai.request.History[0].Text != "Что на фото?\n[На фото: кот сидит на диване]" {
 		t.Fatalf("photo was not added to decision context: photos=%+v vision=%+v incoming=%+v history=%+v", photos, vision, repo.incoming, ai.request.History)
+	}
+}
+
+func TestWorkerReusesDescriptionForIdenticalPhoto(t *testing.T) {
+	repo := &fakeRepo{}
+	ai := &fakeAI{}
+	photos := &fakePhotoDownloader{data: []byte("same-photo-bytes")}
+	vision := &fakePhotoAnalyzer{description: "кот сидит на диване"}
+	worker := Worker{Repo: repo, AI: ai, Telegram: &fakeTelegram{}, Photos: photos, Vision: vision, Username: "MyBot"}
+	for _, id := range []int64{51, 52} {
+		msg := model.Message{MessageID: id, Photo: []model.PhotoSize{{FileID: "photo-1"}}}
+		msg.Chat.ID = -42
+		if err := worker.Process(context.Background(), model.Update{UpdateID: id, Message: &msg}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if vision.calls != 1 || len(repo.history) != 2 || repo.history[0].Text != "[На фото: кот сидит на диване]" || repo.history[1].Text != repo.history[0].Text {
+		t.Fatalf("identical photo was analyzed again or lost from history: calls=%d history=%+v", vision.calls, repo.history)
 	}
 }
 

@@ -51,11 +51,11 @@ func main() {
 	if cfg.listenAddr == "" {
 		cfg.listenAddr = ":8080"
 	}
-	cfg.decisionInterval = time.Minute
+	cfg.decisionInterval = 30 * time.Second
 	if raw := os.Getenv("DECISION_INTERVAL"); raw != "" {
 		interval, err := time.ParseDuration(raw)
 		if err != nil || interval <= 0 {
-			log.Fatal("DECISION_INTERVAL must be a positive Go duration, for example 1m")
+			log.Fatal("DECISION_INTERVAL must be a positive Go duration, for example 30s")
 		}
 		cfg.decisionInterval = interval
 	}

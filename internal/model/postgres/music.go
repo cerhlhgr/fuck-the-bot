@@ -30,7 +30,13 @@ func (s *Store) CreateMusicTask(ctx context.Context, tokenHash string, msg model
 	tag, err := s.pool.Exec(queryCtx, `
 		INSERT INTO bot_music_tasks (token_hash, chat_id, thread_id, source_message_id, request)
 		VALUES ($1, $2, $3, $4, $5::jsonb)
-		ON CONFLICT (chat_id, source_message_id) DO NOTHING`,
+		ON CONFLICT (chat_id, source_message_id) DO UPDATE SET
+			token_hash = EXCLUDED.token_hash,
+			request = EXCLUDED.request,
+			status = 'pending',
+			error = '',
+			updated_at = now()
+		WHERE bot_music_tasks.status = 'failed' AND bot_music_tasks.task_id IS NULL`,
 		tokenHash, msg.Chat.ID, msg.MessageThreadID, msg.MessageID, string(data))
 	if err != nil {
 		return false, err

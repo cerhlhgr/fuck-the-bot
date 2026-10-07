@@ -43,6 +43,18 @@ func TestMusicTaskCallbackAndDelivery(t *testing.T) {
 	if err != nil || created {
 		t.Fatalf("duplicate task: %t, %v", created, err)
 	}
+	if err := store.FailMusicTask(ctx, hash, "provider rejected request"); err != nil {
+		t.Fatal(err)
+	}
+	created, err = store.CreateMusicTask(ctx, "retry-token", msg, request)
+	if err != nil || !created {
+		t.Fatalf("retry rejected task: %t, %v", created, err)
+	}
+	hash = "retry-token"
+	created, err = store.CreateMusicTask(ctx, "another-token", msg, request)
+	if err != nil || created {
+		t.Fatalf("duplicate retry: %t, %v", created, err)
+	}
 	if err := store.ApplyMusicCallback(ctx, "missing", model.MusicCallback{TaskID: "task-1", Stage: "complete", Code: 200}); !errors.Is(err, model.ErrMusicTaskNotFound) {
 		t.Fatalf("unknown token: %v", err)
 	}

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"fuck-the-bot/internal/model"
 )
@@ -23,8 +24,18 @@ type Client struct {
 
 func New(apiURL, key string) (*Client, error) {
 	parsed, err := url.Parse(apiURL)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") || strings.TrimSpace(key) == "" {
-		return nil, errors.New("invalid Suno API URL or key")
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+		return nil, errors.New("invalid SUNO_API_URL")
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil, errors.New("SUNO_API_SECRET_KEY is empty")
+	}
+	if strings.HasPrefix(strings.ToLower(key), "bearer ") {
+		return nil, errors.New("SUNO_API_SECRET_KEY must contain only the key, without Bearer prefix")
+	}
+	if strings.HasPrefix(key, "\"") || strings.HasSuffix(key, "\"") || strings.HasPrefix(key, "'") || strings.HasSuffix(key, "'") {
+		return nil, errors.New("SUNO_API_SECRET_KEY must not contain quote characters")
 	}
 	return &Client{http: &http.Client{Timeout: 25 * time.Second}, apiURL: strings.TrimRight(apiURL, "/"), key: key}, nil
 }
@@ -58,21 +69,69 @@ func (c *Client) Generate(ctx context.Context, music model.MusicRequest, callbac
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("Suno generate request: %w", err)
+		return "", fmt.Errorf("Suno generate transport error: %w", err)
 	}
 	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if err != nil {
+		return "", fmt.Errorf("Suno generate response read failed: HTTP %d: %w", resp.StatusCode, err)
+	}
+	if len(body) > 1<<20 {
+		return "", fmt.Errorf("Suno generate response too large: HTTP %d content_type=%q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
 	var result struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Data struct {
+		Code    int             `json:"code"`
+		Msg     string          `json:"msg"`
+		Message string          `json:"message"`
+		Error   json.RawMessage `json:"error"`
+		Data    struct {
 			TaskID string `json:"taskId"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode Suno generate response: %w", err)
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("Suno generate invalid JSON: HTTP %d content_type=%q response_bytes=%d: %w", resp.StatusCode, resp.Header.Get("Content-Type"), len(body), err)
 	}
-	if resp.StatusCode != http.StatusOK || result.Code != 200 || result.Data.TaskID == "" {
-		return "", fmt.Errorf("Suno generate rejected request: HTTP %d code %d message %q", resp.StatusCode, result.Code, result.Msg)
+	providerMessage := result.Msg
+	if providerMessage == "" {
+		providerMessage = result.Message
+	}
+	if providerMessage == "" && len(result.Error) > 0 {
+		if err := json.Unmarshal(result.Error, &providerMessage); err != nil {
+			var detail struct {
+				Message string `json:"message"`
+				Msg     string `json:"msg"`
+			}
+			if json.Unmarshal(result.Error, &detail) == nil {
+				providerMessage = detail.Message
+				if providerMessage == "" {
+					providerMessage = detail.Msg
+				}
+			}
+		}
+	}
+	providerMessage = safeProviderMessage(providerMessage, c.key, callbackURL, music.Prompt, music.Style, music.Title, music.NegativeTags)
+	if resp.StatusCode != http.StatusOK || result.Code != 200 {
+		hint := ""
+		if resp.StatusCode == http.StatusUnauthorized || result.Code == http.StatusUnauthorized {
+			hint = " hint=check SUNO_API_URL and SUNO_API_SECRET_KEY belong to the same provider; do not include Bearer in the key"
+		}
+		return "", fmt.Errorf("Suno generate rejected: api_host=%q HTTP %d provider_code=%d provider_message=%q%s", req.URL.Host, resp.StatusCode, result.Code, providerMessage, hint)
+	}
+	if result.Data.TaskID == "" {
+		return "", fmt.Errorf("Suno generate returned no taskId: HTTP %d provider_code=%d provider_message=%q", resp.StatusCode, result.Code, providerMessage)
 	}
 	return result.Data.TaskID, nil
+}
+
+func safeProviderMessage(message string, sensitive ...string) string {
+	for _, value := range sensitive {
+		if value != "" {
+			message = strings.ReplaceAll(message, value, "[redacted]")
+		}
+	}
+	message = strings.TrimSpace(message)
+	if utf8.RuneCountInString(message) > 500 {
+		message = string([]rune(message)[:500]) + "…"
+	}
+	return message
 }

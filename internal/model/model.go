@@ -2,7 +2,6 @@ package model
 
 import (
 	"context"
-	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -13,8 +12,6 @@ const (
 	HistoryLifetime = 24 * time.Hour
 	ContextLifetime = time.Hour
 )
-
-var ErrNoUpdates = errors.New("no queued updates")
 
 type User struct {
 	ID        int64  `json:"id"`
@@ -76,14 +73,23 @@ type ImportantEntry struct {
 	Kind            string
 }
 
+type ImportantUpdate struct {
+	SourceMessageID int64
+	Summary         string
+	Kind            string
+}
+
 type Decision struct {
 	Action             string
 	Important          string
 	ImportantKind      string
+	ImportantUpdates   []ImportantUpdate
 	ForgetImportantIDs []int64
 	ReplyToMessageID   int64
 	Reply              string
 	Poll               *Poll
+	Music              *MusicRequest
+	Voice              *VoiceRequest
 	ImageQuery         string
 	Caption            string
 	Reaction           string
@@ -99,20 +105,25 @@ type DecisionRequest struct {
 	CurrentMessageID        int64
 	CurrentReplyToMessageID int64
 	CurrentRepliedToBot     bool
+	NewMessageIDs           []int64
+	NewReplyToBotIDs        []int64
 	History                 []HistoryEntry
 	Important               []ImportantEntry
+	MusicEnabled            bool
+	VoiceEnabled            bool
 }
 
 type Repository interface {
 	EnqueueUpdate(context.Context, Update, []byte) error
-	NextUpdate(context.Context) (Update, error)
-	MarkUpdateProcessed(context.Context, int64) error
+	PendingUpdates(context.Context, int64, int) ([]Update, error)
+	MarkUpdatesProcessed(context.Context, []int64) error
+	TryDecisionLock(context.Context) (func() error, bool, error)
 	Prune(context.Context, time.Time) error
 	AddIncoming(context.Context, Message, time.Time) error
 	AddBotReply(context.Context, int64, int64, int64, string, string, time.Time) error
 	Conversation(context.Context, int64, int64, time.Time) ([]HistoryEntry, error)
 	ImportantContext(context.Context, int64, int64) ([]ImportantEntry, error)
-	ApplyImportant(context.Context, Message, string, string, []int64, time.Time) error
+	ApplyImportantBatch(context.Context, []Message, []ImportantUpdate, []int64, time.Time) error
 }
 
 func MentionedText(msg Message, username string) (string, bool) {

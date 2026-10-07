@@ -46,7 +46,7 @@ func (c *Client) Ask(ctx context.Context, decisionRequest model.DecisionRequest)
 		struct {
 			Role    string `json:"role"`
 			Content string `json:"content"`
-		}{"user", "Выбери уместное действие для нового сообщения по переписке и верни только JSON."},
+		}{"user", "Оцени новые сообщения за период и выбери одно уместное действие для беседы. Верни только JSON."},
 	)
 	content, err := c.completion(ctx, input, "decision", c.model)
 	if err != nil {
@@ -64,13 +64,13 @@ func (c *Client) DescribePhoto(ctx context.Context, photo []byte) (string, error
 	}
 	dataURL := "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(photo)
 	input := struct {
-		Model     string `json:"model"`
-		MaxTokens int    `json:"max_tokens"`
-		Messages  []struct {
+		Model               string `json:"model"`
+		MaxCompletionTokens int    `json:"max_completion_tokens"`
+		Messages            []struct {
 			Role    string `json:"role"`
 			Content any    `json:"content"`
 		} `json:"messages"`
-	}{Model: c.visionModel, MaxTokens: 180}
+	}{Model: c.visionModel, MaxCompletionTokens: 300}
 	input.Messages = append(input.Messages,
 		struct {
 			Role    string `json:"role"`

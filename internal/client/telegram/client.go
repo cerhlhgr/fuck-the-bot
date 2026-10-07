@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +21,7 @@ import (
 
 const endpoint = "https://api.telegram.org/bot"
 const maxPhotoBytes = 5 << 20
+const maxVoiceUploadBytes = 10 << 20
 
 type Client struct {
 	http  *http.Client
@@ -166,6 +170,80 @@ func (c *Client) SendPoll(ctx context.Context, original model.Message, poll mode
 	}
 	var sent json.RawMessage
 	return c.call(ctx, "sendPoll", input, &sent)
+}
+
+func (c *Client) SendAudio(ctx context.Context, original model.Message, audioURL, title string) error {
+	input := struct {
+		ChatID          int64            `json:"chat_id"`
+		MessageThreadID int64            `json:"message_thread_id,omitempty"`
+		Audio           string           `json:"audio"`
+		Title           string           `json:"title,omitempty"`
+		ReplyParameters *replyParameters `json:"reply_parameters,omitempty"`
+	}{
+		ChatID: original.Chat.ID, MessageThreadID: original.MessageThreadID,
+		Audio: audioURL, Title: model.CompactText(title, 64), ReplyParameters: replyTo(original.MessageID),
+	}
+	var sent json.RawMessage
+	return c.call(ctx, "sendAudio", input, &sent)
+}
+
+func (c *Client) SendVoice(ctx context.Context, original model.Message, audio []byte) error {
+	if len(audio) == 0 || len(audio) > maxVoiceUploadBytes {
+		return fmt.Errorf("voice audio must be 1-%d bytes", maxVoiceUploadBytes)
+	}
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	if err := form.WriteField("chat_id", strconv.FormatInt(original.Chat.ID, 10)); err != nil {
+		return err
+	}
+	if original.MessageThreadID > 0 {
+		if err := form.WriteField("message_thread_id", strconv.FormatInt(original.MessageThreadID, 10)); err != nil {
+			return err
+		}
+	}
+	if reply := replyTo(original.MessageID); reply != nil {
+		encoded, err := json.Marshal(reply)
+		if err != nil {
+			return err
+		}
+		if err := form.WriteField("reply_parameters", string(encoded)); err != nil {
+			return err
+		}
+	}
+	part, err := form.CreatePart(textproto.MIMEHeader{
+		"Content-Disposition": {`form-data; name="voice"; filename="voice.mp3"`},
+		"Content-Type":        {"audio/mpeg"},
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := part.Write(audio); err != nil {
+		return err
+	}
+	if err := form.Close(); err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+c.token+"/sendVoice", &body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("send Telegram voice: %s", strings.ReplaceAll(err.Error(), c.token, "[redacted]"))
+	}
+	defer resp.Body.Close()
+	var result struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
+		return fmt.Errorf("decode Telegram voice response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK || !result.OK {
+		return fmt.Errorf("Telegram sendVoice HTTP %d: %s", resp.StatusCode, result.Description)
+	}
+	return nil
 }
 
 func (c *Client) SetReaction(ctx context.Context, target model.Message, emoji string) error {

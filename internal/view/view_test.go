@@ -59,6 +59,7 @@ func TestSystemPromptIncludesPermanentContext(t *testing.T) {
 	request := model.DecisionRequest{
 		BotUsername:      "MyBot",
 		CurrentMessageID: 9,
+		NewMessageIDs:    []int64{8, 9},
 		Important: []model.ImportantEntry{
 			{SourceMessageID: 3, SourceDate: time.Date(2026, 10, 6, 20, 0, 0, 0, time.UTC), Author: "@ivan", Summary: "Не писать в чат", Kind: "instruction"},
 			{SourceMessageID: 4, SourceDate: time.Date(2026, 10, 7, 8, 0, 0, 0, time.UTC), Author: "@ivan", Summary: "Можно снова писать в чат", Kind: "instruction"},
@@ -66,7 +67,7 @@ func TestSystemPromptIncludesPermanentContext(t *testing.T) {
 	}
 	prompt := SystemPrompt(request)
 	memory := ImportantContext(request.Important)
-	if !strings.Contains(prompt, `"important_type":"instruction"`) || !strings.Contains(prompt, `"forget_important_ids"`) || !strings.Contains(memory, `"source_message_id"`) || !strings.Contains(memory, `"kind"`) || !strings.Contains(memory, `2026-10-06T20:00:00Z`) || !strings.Contains(memory, `2026-10-07T08:00:00Z`) || strings.Contains(memory, `source_text`) || strings.Index(memory, request.Important[0].Summary) >= strings.Index(memory, request.Important[1].Summary) || !strings.Contains(prompt, "сравни полные дату и время") {
+	if !strings.Contains(prompt, `"important_updates"`) || !strings.Contains(prompt, `"forget_important_ids"`) || !strings.Contains(prompt, `message_id=[8,9]`) || !strings.Contains(memory, `"source_message_id"`) || !strings.Contains(memory, `"kind"`) || !strings.Contains(memory, `2026-10-06T20:00:00Z`) || !strings.Contains(memory, `2026-10-07T08:00:00Z`) || strings.Contains(memory, `source_text`) || strings.Index(memory, request.Important[0].Summary) >= strings.Index(memory, request.Important[1].Summary) || !strings.Contains(prompt, "сравни полные дату и время") {
 		t.Fatalf("prompt is missing permanent context or output schema: %s", prompt)
 	}
 	other := request
@@ -81,6 +82,10 @@ func TestSystemPromptIncludesPermanentContext(t *testing.T) {
 }
 
 func TestParseAIDecision(t *testing.T) {
+	batchMemory, err := ParseAIDecision(`{"action":"silence","important_updates":[{"source_message_id":10,"summary":"Встреча в пятницу","kind":"fact"},{"source_message_id":11,"summary":"Не писать до утра","kind":"instruction"}]}`)
+	if err != nil || len(batchMemory.ImportantUpdates) != 2 || batchMemory.ImportantUpdates[0].SourceMessageID != 10 || batchMemory.ImportantUpdates[1].Kind != "instruction" {
+		t.Fatalf("batch memory = %+v, %v", batchMemory, err)
+	}
 	remembered, err := ParseAIDecision(`{"action":"silence","important":" Встреча в пятницу в 19:00. "}`)
 	if err != nil || remembered.Action != "silence" || remembered.Important != "Встреча в пятницу в 19:00." {
 		t.Fatalf("silent memory decision = %+v, %v", remembered, err)
@@ -137,6 +142,8 @@ func TestParseAIDecision(t *testing.T) {
 		`{"action":"silence","important":"Не писать","important_type":"other"}`,
 		`{"action":"silence","forget_important_ids":[0]}`,
 		`{"action":"silence","forget_important_ids":[3,3]}`,
+		`{"action":"silence","important_updates":[{"source_message_id":0,"summary":"Встреча","kind":"fact"}]}`,
+		`{"action":"silence","important_updates":[{"source_message_id":1,"summary":"Встреча","kind":"fact"},{"source_message_id":1,"summary":"Повтор","kind":"fact"}]}`,
 		`{"reply":"hi","reply_to_message_id":null}`,
 		`{"reply":null,"reply_to_message_id":17}`,
 		"```json\n{\"reply\":\"hi\"}\n```",
@@ -160,6 +167,63 @@ func TestParseAIDecision(t *testing.T) {
 		if _, err := ParseAIDecision(invalid); err == nil {
 			t.Errorf("accepted %q", invalid)
 		}
+	}
+}
+
+func TestMusicDecision(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		mode  string
+	}{
+		{`{"action":"music","music":{"mode":"simple","prompt":"панк-рок про поездку"},"reply_to_message_id":17}`, "simple"},
+		{`{"action":"music","music":{"mode":"custom","title":"Дорога","style":"punk rock","prompt":"[Verse] Мы едем","vocal_gender":"m"},"reply_to_message_id":17}`, "custom"},
+		{`{"action":"music","music":{"mode":"custom","title":"Дорога","style":"ambient","instrumental":true},"reply_to_message_id":17}`, "custom"},
+	} {
+		got, err := ParseAIDecision(tc.input)
+		if err != nil || got.Action != "music" || got.ReplyToMessageID != 17 || got.Music == nil || got.Music.Mode != tc.mode {
+			t.Fatalf("music decision: %+v, %v", got, err)
+		}
+	}
+	for _, input := range []string{
+		`{"action":"music","music":{"mode":"simple","prompt":"трек"}}`,
+		`{"action":"music","music":{"mode":"simple","prompt":""},"reply_to_message_id":17}`,
+		`{"action":"music","music":{"mode":"custom","title":"Трек","style":"rock"},"reply_to_message_id":17}`,
+		`{"action":"music","music":{"mode":"custom","title":"Трек","style":"rock","prompt":"текст","vocal_gender":"other"},"reply_to_message_id":17}`,
+		`{"action":"reply","reply":"ок","reply_to_message_id":17,"music":{"mode":"simple","prompt":"трек"}}`,
+	} {
+		if _, err := ParseAIDecision(input); err == nil {
+			t.Fatalf("accepted invalid music decision %s", input)
+		}
+	}
+	prompt := SystemPrompt(model.DecisionRequest{BotUsername: "test", MusicEnabled: true})
+	if !strings.Contains(prompt, `"action":"music"`) || !strings.Contains(prompt, "Генерация музыки в этом запуске доступна: true") {
+		t.Fatal("music prompt missing action or availability")
+	}
+}
+
+func TestVoiceDecision(t *testing.T) {
+	decision, err := ParseAIDecision(`{"action":"voice","voice":{"text":" Ну что, собрались? ","speaker":"onyx","instructions":"С лёгкой ехидцей"},"reply_to_message_id":17}`)
+	if err != nil || decision.Voice == nil || decision.Voice.Text != "Ну что, собрались?" || decision.Voice.Speaker != "onyx" || decision.ReplyToMessageID != 17 {
+		t.Fatalf("voice decision: %+v, %v", decision, err)
+	}
+	defaultSpeaker, err := ParseAIDecision(`{"action":"voice","voice":{"text":"Привет"},"reply_to_message_id":17}`)
+	if err != nil || defaultSpeaker.Voice == nil || defaultSpeaker.Voice.Speaker != model.DefaultVoiceSpeaker {
+		t.Fatalf("default speaker: %+v, %v", defaultSpeaker, err)
+	}
+	for _, input := range []string{
+		`{"action":"voice","voice":{"text":"Привет"}}`,
+		`{"action":"voice","voice":{"text":"  "},"reply_to_message_id":17}`,
+		`{"action":"voice","voice":{"text":"Привет","speaker":"unknown"},"reply_to_message_id":17}`,
+		`{"action":"voice","voice":{"text":"` + strings.Repeat("я", model.MaxVoiceTextRunes+1) + `"},"reply_to_message_id":17}`,
+		`{"action":"reply","reply":"Привет","voice":{"text":"Привет"},"reply_to_message_id":17}`,
+	} {
+		if _, err := ParseAIDecision(input); err == nil {
+			t.Fatalf("accepted invalid voice decision: %s", input)
+		}
+	}
+	prompt := SystemPrompt(model.DecisionRequest{BotUsername: "test", VoiceEnabled: true})
+	if !strings.Contains(prompt, `"action":"voice"`) || !strings.Contains(prompt, "Синтез голосовых сообщений доступен: true") {
+		t.Fatal("voice action missing from prompt")
 	}
 }
 

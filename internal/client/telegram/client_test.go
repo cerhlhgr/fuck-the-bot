@@ -121,6 +121,75 @@ func TestSendPoll(t *testing.T) {
 	}
 }
 
+func TestSendAudioToOriginalTopic(t *testing.T) {
+	client := New("test-token")
+	client.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if !strings.HasSuffix(req.URL.Path, "/sendAudio") {
+			t.Fatalf("wrong Telegram method: %s", req.URL.Path)
+		}
+		var input struct {
+			ChatID          int64  `json:"chat_id"`
+			MessageThreadID int64  `json:"message_thread_id"`
+			Audio           string `json:"audio"`
+			Title           string `json:"title"`
+			ReplyParameters struct {
+				MessageID int64 `json:"message_id"`
+			} `json:"reply_parameters"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.ChatID != -42 || input.MessageThreadID != 29 || input.ReplyParameters.MessageID != 17 || input.Audio != "https://cdn.example/song.mp3" || input.Title != "Ночь" {
+			t.Fatalf("wrong audio destination: %+v", input)
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"ok":true,"result":{}}`))}, nil
+	})
+	msg := model.Message{MessageID: 17, MessageThreadID: 29}
+	msg.Chat.ID = -42
+	if err := client.SendAudio(context.Background(), msg, "https://cdn.example/song.mp3", "Ночь"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSendVoiceUploadsMP3ToOriginalTopic(t *testing.T) {
+	client := New("test-token")
+	client.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if !strings.HasSuffix(req.URL.Path, "/sendVoice") || !strings.HasPrefix(req.Header.Get("Content-Type"), "multipart/form-data;") {
+			t.Fatalf("wrong voice request: %s %s", req.URL.Path, req.Header.Get("Content-Type"))
+		}
+		if err := req.ParseMultipartForm(12 << 20); err != nil {
+			t.Fatal(err)
+		}
+		if req.FormValue("chat_id") != "-42" || req.FormValue("message_thread_id") != "29" {
+			t.Fatalf("wrong voice destination: %+v", req.Form)
+		}
+		var reply struct {
+			MessageID int64 `json:"message_id"`
+		}
+		if err := json.Unmarshal([]byte(req.FormValue("reply_parameters")), &reply); err != nil || reply.MessageID != 17 {
+			t.Fatalf("wrong voice reply: %+v, %v", reply, err)
+		}
+		file, header, err := req.FormFile("voice")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		data, err := io.ReadAll(file)
+		if err != nil || string(data) != "ID3fake-mp3" || header.Filename != "voice.mp3" || header.Header.Get("Content-Type") != "audio/mpeg" {
+			t.Fatalf("wrong uploaded voice: %q, %+v, %v", data, header, err)
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"ok":true,"result":{}}`))}, nil
+	})
+	msg := model.Message{MessageID: 17, MessageThreadID: 29}
+	msg.Chat.ID = -42
+	if err := client.SendVoice(context.Background(), msg, []byte("ID3fake-mp3")); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SendVoice(context.Background(), msg, nil); err == nil {
+		t.Fatal("accepted empty voice")
+	}
+}
+
 func TestStandaloneMessageHasNoReplyParameters(t *testing.T) {
 	client := New("test-token")
 	client.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {

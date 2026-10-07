@@ -30,21 +30,57 @@ func (f *fakeRepo) EnqueueUpdate(_ context.Context, item model.Update, _ []byte)
 		return f.insertErr
 	}
 	f.queued = append(f.queued, item)
+	if item.Message != nil {
+		_ = f.AddIncoming(context.Background(), *item.Message, time.Now())
+	}
 	return nil
 }
-func (f *fakeRepo) NextUpdate(context.Context) (model.Update, error) {
-	if len(f.queued) == 0 {
-		return model.Update{}, model.ErrNoUpdates
-	}
-	item := f.queued[0]
-	f.queued = f.queued[1:]
-	return item, nil
+func (f *fakeRepo) TryDecisionLock(context.Context) (func() error, bool, error) {
+	return func() error { return nil }, true, nil
 }
-func (f *fakeRepo) MarkUpdateProcessed(context.Context, int64) error { return nil }
-func (f *fakeRepo) Prune(context.Context, time.Time) error           { return nil }
+func (f *fakeRepo) PendingUpdates(_ context.Context, afterID int64, limit int) ([]model.Update, error) {
+	var result []model.Update
+	for _, item := range f.queued {
+		if item.UpdateID > afterID {
+			result = append(result, item)
+			if len(result) == limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+func (f *fakeRepo) MarkUpdatesProcessed(_ context.Context, ids []int64) error {
+	processed := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		processed[id] = true
+	}
+	kept := f.queued[:0]
+	for _, item := range f.queued {
+		if !processed[item.UpdateID] {
+			kept = append(kept, item)
+		}
+	}
+	f.queued = kept
+	return nil
+}
+func (f *fakeRepo) Prune(context.Context, time.Time) error { return nil }
 func (f *fakeRepo) AddIncoming(_ context.Context, msg model.Message, _ time.Time) error {
-	f.incoming = append(f.incoming, msg)
 	text := model.MessageHistoryText(msg)
+	for i, entry := range f.history {
+		if !entry.Bot && entry.MessageID == msg.MessageID {
+			if msg.PhotoDescription != "" {
+				f.history[i].Text = text
+				for j := range f.incoming {
+					if f.incoming[j].MessageID == msg.MessageID {
+						f.incoming[j] = msg
+					}
+				}
+			}
+			return nil
+		}
+	}
+	f.incoming = append(f.incoming, msg)
 	f.history = append(f.history, model.HistoryEntry{MessageID: msg.MessageID, Text: text, Author: model.AuthorName(msg.From)})
 	return nil
 }
@@ -87,26 +123,57 @@ func (f *fakeRepo) ApplyImportant(_ context.Context, msg model.Message, summary,
 	f.important = append(f.important, model.ImportantEntry{SourceMessageID: msg.MessageID, SourceDate: now, Author: model.AuthorName(msg.From), Summary: summary, Kind: kind})
 	return nil
 }
+func (f *fakeRepo) ApplyImportantBatch(ctx context.Context, messages []model.Message, updates []model.ImportantUpdate, forgetIDs []int64, now time.Time) error {
+	if f.importantErr != nil {
+		return f.importantErr
+	}
+	if len(messages) > 0 && len(forgetIDs) > 0 {
+		if err := f.ApplyImportant(ctx, messages[0], "", "", forgetIDs, now); err != nil {
+			return err
+		}
+	}
+	byID := make(map[int64]model.Message, len(messages))
+	for _, msg := range messages {
+		byID[msg.MessageID] = msg
+	}
+	for _, update := range updates {
+		if err := f.ApplyImportant(ctx, byID[update.SourceMessageID], update.Summary, update.Kind, nil, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 type fakeAI struct {
 	request  model.DecisionRequest
+	requests []model.DecisionRequest
 	decision model.Decision
+	err      error
 	calls    int
 }
 
 func (f *fakeAI) Ask(_ context.Context, request model.DecisionRequest) (model.Decision, error) {
 	f.request = request
+	f.requests = append(f.requests, request)
 	f.calls++
-	return f.decision, nil
+	return f.decision, f.err
 }
 
 type fakeTelegram struct {
 	messages        []model.Message
 	answers         []string
+	voiceTargets    []model.Message
+	voices          [][]byte
 	pollTargets     []model.Message
 	polls           []model.Poll
 	reactionTargets []model.Message
 	reactions       []string
+}
+
+func (f *fakeTelegram) SendVoice(_ context.Context, msg model.Message, audio []byte) error {
+	f.voiceTargets = append(f.voiceTargets, msg)
+	f.voices = append(f.voices, append([]byte(nil), audio...))
+	return nil
 }
 
 func (f *fakeTelegram) SendMessage(_ context.Context, msg model.Message, answer string) error {
@@ -184,11 +251,84 @@ func TestWebhookHandler(t *testing.T) {
 		t.Fatalf("storage failure status = %d", got)
 	}
 	repo.insertErr = nil
-	if got := request(http.MethodPost, `{"update_id":123}`); got != http.StatusOK {
+	if got := request(http.MethodPost, `{"update_id":123,"message":{"message_id":7,"chat":{"id":-42},"text":"привет"}}`); got != http.StatusOK {
 		t.Fatalf("valid request status = %d", got)
 	}
-	if len(repo.queued) != 1 || repo.queued[0].UpdateID != 123 || len(handler.Wake()) != 1 {
-		t.Fatalf("update not queued: %+v", repo.queued)
+	if len(repo.queued) != 1 || repo.queued[0].UpdateID != 123 || len(repo.history) != 1 || repo.history[0].Text != "привет" {
+		t.Fatalf("update was not stored immediately: queued=%+v history=%+v", repo.queued, repo.history)
+	}
+}
+
+func TestScheduledRunGroupsPendingMessagesByDialogue(t *testing.T) {
+	repo := &fakeRepo{}
+	for _, item := range []struct {
+		updateID, chatID, threadID, messageID int64
+	}{
+		{1, -42, 0, 10},
+		{2, -42, 0, 11},
+		{3, -43, 0, 20},
+		{4, -42, 7, 30},
+	} {
+		msg := model.Message{MessageID: item.messageID, MessageThreadID: item.threadID, Text: "сообщение"}
+		msg.Chat.ID = item.chatID
+		if err := repo.EnqueueUpdate(context.Background(), model.Update{UpdateID: item.updateID, Message: &msg}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(repo.incoming) != 4 {
+		t.Fatal("webhook did not store messages before the scheduled run")
+	}
+	ai := &fakeAI{decision: model.Decision{Action: "silence"}}
+	worker := Worker{Repo: repo, AI: ai, Telegram: &fakeTelegram{}, Username: "MyBot"}
+	if err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if ai.calls != 3 || len(ai.requests[0].NewMessageIDs) != 2 || ai.requests[0].NewMessageIDs[0] != 10 || ai.requests[0].NewMessageIDs[1] != 11 || len(ai.requests[1].NewMessageIDs) != 1 || ai.requests[1].NewMessageIDs[0] != 20 || len(ai.requests[2].NewMessageIDs) != 1 || ai.requests[2].NewMessageIDs[0] != 30 || len(repo.queued) != 0 {
+		t.Fatalf("scheduled grouping failed: calls=%d requests=%+v pending=%+v", ai.calls, ai.requests, repo.queued)
+	}
+}
+
+func TestScheduledRunRetriesFailedDecision(t *testing.T) {
+	repo := &fakeRepo{}
+	msg := model.Message{MessageID: 10, Text: "Привет"}
+	msg.Chat.ID = -42
+	if err := repo.EnqueueUpdate(context.Background(), model.Update{UpdateID: 1, Message: &msg}, nil); err != nil {
+		t.Fatal(err)
+	}
+	ai := &fakeAI{err: errors.New("AI temporarily unavailable")}
+	worker := Worker{Repo: repo, AI: ai, Telegram: &fakeTelegram{}, Username: "MyBot"}
+	if err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.queued) != 1 || ai.calls != 1 {
+		t.Fatalf("failed decision was lost: calls=%d pending=%+v", ai.calls, repo.queued)
+	}
+	ai.err = nil
+	ai.decision = model.Decision{Action: "silence"}
+	if err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.queued) != 0 || ai.calls != 2 {
+		t.Fatalf("failed decision was not retried: calls=%d pending=%+v", ai.calls, repo.queued)
+	}
+}
+
+func TestBatchStoresImportantFactsFromDifferentMessages(t *testing.T) {
+	repo := &fakeRepo{}
+	ai := &fakeAI{decision: model.Decision{Action: "silence", ImportantUpdates: []model.ImportantUpdate{
+		{SourceMessageID: 10, Summary: "Встреча в пятницу", Kind: "fact"},
+		{SourceMessageID: 11, Summary: "Не писать до утра", Kind: "instruction"},
+	}}}
+	worker := Worker{Repo: repo, AI: ai, Telegram: &fakeTelegram{}, Username: "MyBot"}
+	first := model.Message{MessageID: 10, Text: "Встречаемся в пятницу"}
+	first.Chat.ID = -42
+	second := model.Message{MessageID: 11, Text: "Бот, не пиши до утра"}
+	second.Chat.ID = -42
+	if err := worker.ProcessBatch(context.Background(), []model.Update{{UpdateID: 1, Message: &first}, {UpdateID: 2, Message: &second}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.important) != 2 || repo.important[0].SourceMessageID != 10 || repo.important[1].SourceMessageID != 11 || repo.important[1].Kind != "instruction" {
+		t.Fatalf("batch lost important facts: %+v", repo.important)
 	}
 }
 

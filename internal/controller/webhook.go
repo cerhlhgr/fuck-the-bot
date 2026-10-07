@@ -17,14 +17,11 @@ const (
 
 type Webhook struct {
 	repo model.Repository
-	wake chan struct{}
 }
 
 func NewWebhook(repo model.Repository) *Webhook {
-	return &Webhook{repo: repo, wake: make(chan struct{}, 1)}
+	return &Webhook{repo: repo}
 }
-
-func (h *Webhook) Wake() <-chan struct{} { return h.wake }
 
 func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/healthz" && r.Method == http.MethodGet {
@@ -74,10 +71,6 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Printf("webhook queue failed update_id=%d chat_id=%d message_id=%d error=%v", item.UpdateID, chatID, messageID, err)
 		http.Error(w, "storage unavailable", http.StatusServiceUnavailable)
 		return
-	}
-	select {
-	case h.wake <- struct{}{}:
-	default:
 	}
 	log.Printf("webhook accepted update_id=%d chat_id=%d message_id=%d duration=%s", item.UpdateID, chatID, messageID, time.Since(started))
 	w.WriteHeader(http.StatusOK)

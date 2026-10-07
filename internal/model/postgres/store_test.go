@@ -3,7 +3,6 @@ package postgres_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -121,15 +120,16 @@ func TestPostgresHistoryAndInbox(t *testing.T) {
 	if err := store.EnqueueUpdate(ctx, item, raw); err != nil {
 		t.Fatal(err)
 	}
-	next, err := store.NextUpdate(ctx)
-	if err != nil || next.UpdateID != updateID {
-		t.Fatalf("queued update = %+v, %v", next, err)
+	pending, err := store.PendingUpdates(ctx, 0, 10)
+	if err != nil || len(pending) != 1 || pending[0].UpdateID != updateID {
+		t.Fatalf("queued updates = %+v, %v", pending, err)
 	}
-	if err := store.MarkUpdateProcessed(ctx, updateID); err != nil {
+	if err := store.MarkUpdatesProcessed(ctx, []int64{updateID}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.NextUpdate(ctx); !errors.Is(err, model.ErrNoUpdates) {
-		t.Fatalf("processed update still pending: %v", err)
+	pending, err = store.PendingUpdates(ctx, 0, 10)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("processed update still pending: %+v, %v", pending, err)
 	}
 	var count int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM bot_updates WHERE update_id = $1`, updateID).Scan(&count); err != nil || count != 1 {
@@ -183,5 +183,96 @@ func TestPostgresHistoryAndInbox(t *testing.T) {
 	important, err = store.ImportantContext(ctx, chatID, 0)
 	if err != nil || len(important) != 1 || important[0].SourceMessageID != replacement.MessageID {
 		t.Fatalf("cancelled fact remained in permanent context: %+v, %v", important, err)
+	}
+}
+
+func TestPostgresScheduledInboxAndBatchMemory(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL to test PostgreSQL")
+	}
+	ctx := context.Background()
+	pool, err := postgres.OpenPool(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := migrations.Up(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	store := postgres.New(pool)
+	chatID := -time.Now().UnixNano()
+	updateBase := -chatID
+	unlock, acquired, err := store.TryDecisionLock(ctx)
+	if err != nil || !acquired {
+		t.Fatalf("first worker did not acquire lock: acquired=%t err=%v", acquired, err)
+	}
+	otherUnlock, acquired, err := store.TryDecisionLock(ctx)
+	if err != nil || acquired || otherUnlock != nil {
+		t.Fatalf("second worker acquired the same lock: acquired=%t err=%v", acquired, err)
+	}
+	if err := unlock(); err != nil {
+		t.Fatal(err)
+	}
+	unlockedAgain, acquired, err := store.TryDecisionLock(ctx)
+	if err != nil || !acquired {
+		t.Fatalf("lock was not released: acquired=%t err=%v", acquired, err)
+	}
+	if err := unlockedAgain(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM bot_important_context WHERE chat_id = $1`, chatID)
+		_, _ = pool.Exec(ctx, `DELETE FROM bot_history WHERE chat_id = $1`, chatID)
+		_, _ = pool.Exec(ctx, `DELETE FROM bot_updates WHERE update_id BETWEEN $1 AND $2`, updateBase, updateBase+2)
+	}()
+	now := time.Now().UTC().Truncate(time.Second)
+	var messages []model.Message
+	for i := int64(0); i < 3; i++ {
+		msg := model.Message{MessageID: 100 + i, Date: now.Unix(), Text: "сообщение"}
+		msg.Chat.ID = chatID
+		if i == 2 {
+			msg.MessageThreadID = 7
+		}
+		item := model.Update{UpdateID: updateBase + i, Message: &msg}
+		raw, _ := json.Marshal(item)
+		if err := store.EnqueueUpdate(ctx, item, raw); err != nil {
+			t.Fatal(err)
+		}
+		messages = append(messages, msg)
+	}
+	history, err := store.Conversation(ctx, chatID, 0, now.Add(time.Second))
+	if err != nil || len(history) != 2 || history[0].MessageID != 100 || history[1].MessageID != 101 {
+		t.Fatalf("webhook did not immediately store dialogue messages: %+v, %v", history, err)
+	}
+	pending, err := store.PendingUpdates(ctx, 0, 10)
+	if err != nil || len(pending) != 3 || pending[0].UpdateID != updateBase || pending[2].UpdateID != updateBase+2 {
+		t.Fatalf("wrong pending updates: %+v, %v", pending, err)
+	}
+	if err := store.MarkUpdatesProcessed(ctx, []int64{updateBase, updateBase + 1}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = store.PendingUpdates(ctx, 0, 10)
+	if err != nil || len(pending) != 1 || pending[0].UpdateID != updateBase+2 {
+		t.Fatalf("processed updates returned again: %+v, %v", pending, err)
+	}
+	updates := []model.ImportantUpdate{
+		{SourceMessageID: 100, Summary: "Встреча в пятницу", Kind: "fact"},
+		{SourceMessageID: 101, Summary: "Не писать в чат", Kind: "instruction"},
+	}
+	if err := store.ApplyImportantBatch(ctx, messages[:2], updates, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	important, err := store.ImportantContext(ctx, chatID, 0)
+	if err != nil || len(important) != 2 || important[0].SourceMessageID != 100 || important[1].SourceMessageID != 101 {
+		t.Fatalf("batch memory was not stored per message: %+v, %v", important, err)
+	}
+	invalid := []model.ImportantUpdate{{SourceMessageID: 100, Summary: "нельзя", Kind: "invalid"}}
+	if err := store.ApplyImportantBatch(ctx, messages[:2], invalid, []int64{100}, now); err == nil {
+		t.Fatal("invalid batch should fail")
+	}
+	important, err = store.ImportantContext(ctx, chatID, 0)
+	if err != nil || len(important) != 2 {
+		t.Fatalf("failed batch removed a fact: %+v, %v", important, err)
 	}
 }

@@ -47,12 +47,13 @@ func TestAskSendsSystemPromptWithHistory(t *testing.T) {
 }
 
 func TestDescribePhotoSendsImageToVisionModel(t *testing.T) {
-	client := New("test-key", "openai/gpt-5.4-nano", "openai/gpt-4.1-mini")
+	client := New("test-key", "openai/gpt-5.4-nano", "openai/gpt-5.4-nano")
 	photo := []byte{0xff, 0xd8, 0xff, 0xe0, 0, 16}
 	client.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		var input struct {
-			Model    string `json:"model"`
-			Messages []struct {
+			Model               string `json:"model"`
+			MaxCompletionTokens int    `json:"max_completion_tokens"`
+			Messages            []struct {
 				Role    string          `json:"role"`
 				Content json.RawMessage `json:"content"`
 			} `json:"messages"`
@@ -60,7 +61,7 @@ func TestDescribePhotoSendsImageToVisionModel(t *testing.T) {
 		if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
 			t.Fatal(err)
 		}
-		if input.Model != "openai/gpt-4.1-mini" || len(input.Messages) != 2 || input.Messages[1].Role != "user" {
+		if input.Model != "openai/gpt-5.4-nano" || input.MaxCompletionTokens != 300 || len(input.Messages) != 2 || input.Messages[1].Role != "user" {
 			t.Fatalf("wrong vision request: %+v", input)
 		}
 		var parts []struct {

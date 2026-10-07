@@ -69,6 +69,56 @@ func TestSendReply(t *testing.T) {
 	}
 }
 
+func TestSendContactMentionEscapesNameAndTargetsThread(t *testing.T) {
+	client := New("test-token")
+	client.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var input struct {
+			ChatID          int64  `json:"chat_id"`
+			MessageThreadID int64  `json:"message_thread_id"`
+			Text            string `json:"text"`
+			ParseMode       string `json:"parse_mode"`
+			ReplyParameters struct {
+				MessageID int64 `json:"message_id"`
+			} `json:"reply_parameters"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.ChatID != -42 || input.MessageThreadID != 29 || input.ReplyParameters.MessageID != 81 || input.ParseMode != "HTML" || input.Text != `Вот &lt;смотри&gt; <a href="tg://user?id=123">Сергей &lt;админ&gt; (@sergey)</a>` {
+			t.Fatalf("wrong contact mention: %+v", input)
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"ok":true,"result":{}}`))}, nil
+	})
+	msg := model.Message{MessageID: 81, MessageThreadID: 29}
+	msg.Chat.ID = -42
+	contact := model.Contact{UserID: 123, Username: "sergey", Name: "Сергей <админ>", Link: "tg://user?id=123"}
+	if err := client.SendContactMention(context.Background(), msg, contact, "Вот <смотри>"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSendContactMentionWithoutUsername(t *testing.T) {
+	client := New("test-token")
+	client.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var input struct {
+			Text      string `json:"text"`
+			ParseMode string `json:"parse_mode"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.ParseMode != "HTML" || input.Text != `<a href="tg://user?id=456">Серёжа</a>` {
+			t.Fatalf("id-only mention = %+v", input)
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"ok":true,"result":{}}`))}, nil
+	})
+	msg := model.Message{MessageID: 81}
+	msg.Chat.ID = -42
+	if err := client.SendContactMention(context.Background(), msg, model.Contact{UserID: 456, Name: "Серёжа", Link: "tg://user?id=456"}, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDownloadPhotoChoosesLargestAllowedSize(t *testing.T) {
 	client := New("test-token")
 	photo := []byte{0xff, 0xd8, 0xff, 0xe0, 0, 16}

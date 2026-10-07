@@ -53,6 +53,7 @@ type Message struct {
 	Photo            []PhotoSize `json:"photo"`
 	PhotoDescription string      `json:"-"`
 	ReplyToMessage   *Message    `json:"reply_to_message"`
+	SenderChat       *struct{}   `json:"sender_chat"`
 }
 
 type Update struct {
@@ -95,6 +96,13 @@ type RepliedToBotMessage struct {
 	BotText       string `json:"bot_text"`
 }
 
+type Contact struct {
+	UserID   int64
+	Username string
+	Name     string
+	Link     string
+}
+
 type Decision struct {
 	Actions            []Decision
 	Action             string
@@ -110,6 +118,7 @@ type Decision struct {
 	ImageQuery         string
 	Caption            string
 	Reaction           string
+	ContactQuery       string
 }
 
 type Poll struct {
@@ -142,6 +151,7 @@ type Repository interface {
 	Conversation(context.Context, int64, int64, time.Time) ([]HistoryEntry, error)
 	ImportantContext(context.Context, int64, int64) ([]ImportantEntry, error)
 	ApplyImportantBatch(context.Context, []Message, []ImportantUpdate, []int64, time.Time) error
+	FindContacts(context.Context, int64, string) ([]Contact, error)
 }
 
 func MentionedText(msg Message, username string) (string, bool) {
@@ -205,6 +215,19 @@ func AuthorName(u *User) string {
 	}
 	if name := strings.TrimSpace(u.FirstName + " " + u.LastName); name != "" {
 		return CompactText(name, 80)
+	}
+	return "user#" + strconv.FormatInt(u.ID, 10)
+}
+
+func ContactName(u *User) string {
+	if u == nil {
+		return ""
+	}
+	if name := CompactText(strings.TrimSpace(u.FirstName+" "+u.LastName), 80); name != "" {
+		return name
+	}
+	if u.Username != "" {
+		return "@" + u.Username
 	}
 	return "user#" + strconv.FormatInt(u.ID, 10)
 }

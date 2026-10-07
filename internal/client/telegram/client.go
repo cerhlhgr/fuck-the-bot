@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -165,6 +166,34 @@ func (c *Client) SendMessage(ctx context.Context, original model.Message, answer
 		}
 	}
 	return nil
+}
+
+func (c *Client) SendContactMention(ctx context.Context, original model.Message, contact model.Contact, introduction string) error {
+	expectedLink := fmt.Sprintf("tg://user?id=%d", contact.UserID)
+	if contact.UserID <= 0 || contact.Link != expectedLink {
+		return fmt.Errorf("invalid contact mention link")
+	}
+	name := strings.TrimSpace(contact.Name)
+	if contact.Username != "" && !strings.EqualFold(name, "@"+contact.Username) {
+		name += " (@" + contact.Username + ")"
+	}
+	if name == "" {
+		name = fmt.Sprintf("user#%d", contact.UserID)
+	}
+	text := strings.TrimSpace(html.EscapeString(introduction))
+	if text != "" {
+		text += " "
+	}
+	text += `<a href="` + expectedLink + `">` + html.EscapeString(name) + `</a>`
+	input := struct {
+		ChatID          int64            `json:"chat_id"`
+		Text            string           `json:"text"`
+		ParseMode       string           `json:"parse_mode"`
+		MessageThreadID int64            `json:"message_thread_id,omitempty"`
+		ReplyParameters *replyParameters `json:"reply_parameters,omitempty"`
+	}{ChatID: original.Chat.ID, Text: text, ParseMode: "HTML", MessageThreadID: original.MessageThreadID, ReplyParameters: replyTo(original.MessageID)}
+	var sent json.RawMessage
+	return c.call(ctx, "sendMessage", input, &sent)
 }
 
 func (c *Client) SendPoll(ctx context.Context, original model.Message, poll model.Poll) error {

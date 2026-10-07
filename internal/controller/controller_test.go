@@ -21,6 +21,7 @@ type fakeRepo struct {
 	replyTargets         []int64
 	history              []model.HistoryEntry
 	important            []model.ImportantEntry
+	contacts             map[int64][]model.Contact
 	importantSourceText  string
 	importantErr         error
 	conversationThreadID int64
@@ -121,6 +122,16 @@ func (f *fakeRepo) Conversation(_ context.Context, _, threadID int64, _ time.Tim
 func (f *fakeRepo) ImportantContext(context.Context, int64, int64) ([]model.ImportantEntry, error) {
 	return f.important, nil
 }
+func (f *fakeRepo) FindContacts(_ context.Context, chatID int64, query string) ([]model.Contact, error) {
+	query = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(query)), "@")
+	var matches []model.Contact
+	for _, contact := range f.contacts[chatID] {
+		if strings.Contains(strings.ToLower(contact.Name), query) || strings.Contains(strings.ToLower(contact.Username), query) {
+			matches = append(matches, contact)
+		}
+	}
+	return matches, nil
+}
 func (f *fakeRepo) ApplyImportant(_ context.Context, msg model.Message, summary, kind string, forgetIDs []int64, now time.Time) error {
 	if f.importantErr != nil {
 		return f.importantErr
@@ -188,6 +199,7 @@ func (f *fakeAI) Ask(_ context.Context, request model.DecisionRequest) (model.De
 type fakeTelegram struct {
 	messages           []model.Message
 	answers            []string
+	mentionedContacts  []model.Contact
 	sendMessageCalls   int
 	sendMessageErrorAt int
 	sendMessageErr     error
@@ -215,6 +227,12 @@ func (f *fakeTelegram) SendMessage(_ context.Context, msg model.Message, answer 
 	}
 	f.messages = append(f.messages, msg)
 	f.answers = append(f.answers, answer)
+	return nil
+}
+
+func (f *fakeTelegram) SendContactMention(_ context.Context, msg model.Message, contact model.Contact, _ string) error {
+	f.messages = append(f.messages, msg)
+	f.mentionedContacts = append(f.mentionedContacts, contact)
 	return nil
 }
 
@@ -322,6 +340,43 @@ func TestScheduledRunGroupsPendingMessagesByDialogue(t *testing.T) {
 	}
 	if ai.calls != 3 || len(ai.requests[0].NewMessageIDs) != 2 || ai.requests[0].NewMessageIDs[0] != 10 || ai.requests[0].NewMessageIDs[1] != 11 || len(ai.requests[1].NewMessageIDs) != 1 || ai.requests[1].NewMessageIDs[0] != 20 || len(ai.requests[2].NewMessageIDs) != 1 || ai.requests[2].NewMessageIDs[0] != 30 || len(repo.queued) != 0 {
 		t.Fatalf("scheduled grouping failed: calls=%d requests=%+v pending=%+v", ai.calls, ai.requests, repo.queued)
+	}
+}
+
+func TestWorkerMentionsContactFromCurrentChat(t *testing.T) {
+	repo := &fakeRepo{contacts: map[int64][]model.Contact{
+		-42: {{UserID: 123, Username: "sergey", Name: "Сергей", Link: "tg://user?id=123"}},
+		-43: {{UserID: 456, Username: "sergey", Name: "Сергей", Link: "tg://user?id=456"}},
+	}}
+	msg := model.Message{MessageID: 81, Text: "Позови Сергея"}
+	mentionTestMessage(&msg, "mybot")
+	msg.Chat.ID = -42
+	ai := &fakeAI{decision: model.Decision{Actions: []model.Decision{{Action: "mention", ContactQuery: "Сергей", Reply: "Вот:", ReplyToMessageID: 81}}}}
+	tg := &fakeTelegram{}
+	worker := Worker{Repo: repo, AI: ai, Telegram: tg, Username: "mybot"}
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 1, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(tg.mentionedContacts) != 1 || tg.mentionedContacts[0].UserID != 123 || len(tg.messages) != 1 || tg.messages[0].MessageID != 81 {
+		t.Fatalf("wrong contact mentioned: contacts=%+v messages=%+v", tg.mentionedContacts, tg.messages)
+	}
+}
+
+func TestWorkerAsksToClarifyAmbiguousContact(t *testing.T) {
+	repo := &fakeRepo{contacts: map[int64][]model.Contact{
+		-42: {{UserID: 123, Name: "Сергей Иванов", Link: "tg://user?id=123"}, {UserID: 456, Name: "Сергей Петров", Link: "tg://user?id=456"}},
+	}}
+	msg := model.Message{MessageID: 81, Text: "Позови Сергея"}
+	mentionTestMessage(&msg, "mybot")
+	msg.Chat.ID = -42
+	ai := &fakeAI{decision: model.Decision{Actions: []model.Decision{{Action: "mention", ContactQuery: "Сергей", ReplyToMessageID: 81}}}}
+	tg := &fakeTelegram{}
+	worker := Worker{Repo: repo, AI: ai, Telegram: tg, Username: "mybot"}
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 1, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(tg.mentionedContacts) != 0 || len(tg.answers) != 1 || !strings.Contains(tg.answers[0], "Уточни") {
+		t.Fatalf("ambiguous contact silently chosen: mentions=%+v answers=%+v", tg.mentionedContacts, tg.answers)
 	}
 }
 

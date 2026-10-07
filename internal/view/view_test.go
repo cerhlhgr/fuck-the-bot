@@ -91,6 +91,20 @@ func TestSystemPromptLinksReplyToBotWithUserMessage(t *testing.T) {
 	}
 }
 
+func TestMentionActionUsesContactLookup(t *testing.T) {
+	prompt := SystemPrompt(model.DecisionRequest{BotUsername: "mybot"})
+	if !strings.Contains(prompt, `"action":"mention"`) || !strings.Contains(prompt, "contact_query") {
+		t.Fatalf("contact lookup not described in prompt")
+	}
+	decision, err := ParseAIDecision(`{"actions":[{"action":"mention","contact_query":"Сергей","reply":"Вот:","reply_to_message_id":123}]}`)
+	if err != nil || len(decision.Actions) != 1 || decision.Actions[0].ContactQuery != "Сергей" || decision.Actions[0].ReplyToMessageID != 123 {
+		t.Fatalf("mention action = %+v, %v", decision, err)
+	}
+	if _, err := ParseAIDecision(`{"actions":[{"action":"mention","contact_query":"","reply_to_message_id":123}]}`); err == nil {
+		t.Fatal("empty contact query accepted")
+	}
+}
+
 func TestParseAIDecision(t *testing.T) {
 	batchMemory, err := ParseAIDecision(`{"action":"silence","important_updates":[{"source_message_id":10,"summary":"Встреча в пятницу","kind":"fact"},{"source_message_id":11,"summary":"Не писать до утра","kind":"instruction"}]}`)
 	if err != nil || len(batchMemory.ImportantUpdates) != 2 || batchMemory.ImportantUpdates[0].SourceMessageID != 10 || batchMemory.ImportantUpdates[1].Kind != "instruction" {

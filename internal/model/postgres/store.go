@@ -178,6 +178,20 @@ func insertIncoming(ctx context.Context, db incomingExecer, msg model.Message, n
 	if msg.Date == 0 || date.After(now) {
 		date = now
 	}
+	if msg.From != nil && msg.From.ID > 0 && !msg.From.IsBot && msg.SenderChat == nil && msg.Chat.ID != 0 {
+		if _, err := db.Exec(ctx, `
+			INSERT INTO bot_contacts (chat_id, user_id, username, display_name, link, last_seen_at)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (chat_id, user_id) DO UPDATE SET
+				username = EXCLUDED.username,
+				display_name = EXCLUDED.display_name,
+				link = EXCLUDED.link,
+				last_seen_at = EXCLUDED.last_seen_at
+			WHERE bot_contacts.last_seen_at <= EXCLUDED.last_seen_at`,
+			msg.Chat.ID, msg.From.ID, msg.From.Username, model.ContactName(msg.From), fmt.Sprintf("tg://user?id=%d", msg.From.ID), date); err != nil {
+			return fmt.Errorf("save chat contact: %w", err)
+		}
+	}
 	if date.Before(now.Add(-model.HistoryLifetime)) {
 		return nil
 	}

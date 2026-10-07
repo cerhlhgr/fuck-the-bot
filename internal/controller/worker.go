@@ -19,6 +19,7 @@ type AI interface {
 
 type Messenger interface {
 	SendMessage(context.Context, model.Message, string) error
+	SendContactMention(context.Context, model.Message, model.Contact, string) error
 	SendVoice(context.Context, model.Message, []byte) error
 	SendPoll(context.Context, model.Message, model.Poll) error
 	SetReaction(context.Context, model.Message, string) error
@@ -423,7 +424,7 @@ func validActionTarget(action model.Decision, history []model.HistoryEntry, mess
 	if !found {
 		return false
 	}
-	if action.Action == "voice" || action.Action == "music" {
+	if action.Action == "voice" || action.Action == "music" || action.Action == "mention" {
 		for _, message := range messages {
 			if message.MessageID == id {
 				return true
@@ -510,6 +511,37 @@ func (w *Worker) executeAction(ctx context.Context, msg model.Message, updateID 
 		}
 		storedText = "Реакция: " + decision.Reaction
 		log.Printf("Telegram reaction set update_id=%d chat_id=%d reply_to_message_id=%d", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID)
+	case "mention":
+		contacts, err := w.Repo.FindContacts(ctx, msg.Chat.ID, decision.ContactQuery)
+		if err != nil {
+			return fmt.Errorf("chat_id=%d find contact: %w", msg.Chat.ID, err)
+		}
+		contact, found, ambiguous := chooseContact(contacts, decision.ContactQuery)
+		switch {
+		case ambiguous:
+			var names []string
+			for _, candidate := range contacts {
+				name := candidate.Name
+				if candidate.Username != "" && !strings.EqualFold(name, "@"+candidate.Username) {
+					name += " (@" + candidate.Username + ")"
+				}
+				names = append(names, name)
+			}
+			storedText = "Нашёл нескольких: " + strings.Join(names, ", ") + ". Уточни @username или полное имя."
+		case !found:
+			storedText = "Не нашёл такого человека среди тех, кто писал в этой беседе."
+		default:
+			if err := w.Telegram.SendContactMention(ctx, target, contact, decision.Reply); err != nil {
+				return fmt.Errorf("chat_id=%d mention Telegram contact: %w", msg.Chat.ID, err)
+			}
+			storedText = strings.TrimSpace(decision.Reply + " " + contact.Name + " (" + contact.Link + ")")
+			log.Printf("Telegram contact mentioned update_id=%d chat_id=%d user_id=%d", item.UpdateID, msg.Chat.ID, contact.UserID)
+		}
+		if !found {
+			if err := w.Telegram.SendMessage(ctx, target, storedText); err != nil {
+				return fmt.Errorf("chat_id=%d send contact lookup result: %w", msg.Chat.ID, err)
+			}
+		}
 	case "music":
 		if decision.Music == nil {
 			return errors.New("AI selected music without parameters")
@@ -564,4 +596,37 @@ func (w *Worker) executeAction(ctx context.Context, msg model.Message, updateID 
 	}
 	log.Printf("bot response stored update_id=%d chat_id=%d", item.UpdateID, msg.Chat.ID)
 	return nil
+}
+
+func chooseContact(contacts []model.Contact, query string) (model.Contact, bool, bool) {
+	query = normalizeContactName(strings.TrimPrefix(strings.TrimSpace(query), "@"))
+	var exactUsername []model.Contact
+	var exactName []model.Contact
+	for _, contact := range contacts {
+		if contact.Username != "" && normalizeContactName(contact.Username) == query {
+			exactUsername = append(exactUsername, contact)
+		} else if normalizeContactName(contact.Name) == query {
+			exactName = append(exactName, contact)
+		}
+	}
+	if len(exactUsername) == 1 {
+		return exactUsername[0], true, false
+	}
+	if len(exactUsername) > 1 {
+		return model.Contact{}, false, true
+	}
+	if len(exactName) == 1 {
+		return exactName[0], true, false
+	}
+	if len(exactName) > 1 || len(contacts) > 1 {
+		return model.Contact{}, false, true
+	}
+	if len(contacts) == 1 {
+		return contacts[0], true, false
+	}
+	return model.Contact{}, false, false
+}
+
+func normalizeContactName(s string) string {
+	return strings.ReplaceAll(strings.ToLower(s), "ё", "е")
 }

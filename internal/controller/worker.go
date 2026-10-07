@@ -218,7 +218,8 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 		}
 		msg := *pending.Message
 		log.Printf("message loaded update_id=%d chat_id=%d thread_id=%d message_id=%d", pending.UpdateID, msg.Chat.ID, msg.MessageThreadID, msg.MessageID)
-		if len(msg.Photo) > 0 && (msg.From == nil || !msg.From.IsBot) && (msg.Date == 0 || !time.Unix(msg.Date, 0).Before(now.Add(-model.ContextLifetime))) {
+		_, mentioned := model.MentionedText(msg, w.Username)
+		if mentioned && len(msg.Photo) > 0 && (msg.From == nil || !msg.From.IsBot) && (msg.Date == 0 || !time.Unix(msg.Date, 0).Before(now.Add(-model.ContextLifetime))) {
 			log.Printf("photo analysis started update_id=%d chat_id=%d message_id=%d", pending.UpdateID, msg.Chat.ID, msg.MessageID)
 			if w.Photos == nil || w.Vision == nil {
 				log.Printf("photo analysis unavailable update_id=%d reason=not_configured", pending.UpdateID)
@@ -247,6 +248,10 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 		}
 		if msg.Date != 0 && time.Unix(msg.Date, 0).Before(now.Add(-model.ContextLifetime)) {
 			log.Printf("AI decision skipped update_id=%d reason=message_older_than_one_hour", pending.UpdateID)
+			continue
+		}
+		if !mentioned {
+			log.Printf("AI decision skipped update_id=%d reason=bot_not_mentioned", pending.UpdateID)
 			continue
 		}
 		if len(messages) > 0 && (messages[0].Chat.ID != msg.Chat.ID || messages[0].MessageThreadID != msg.MessageThreadID) {

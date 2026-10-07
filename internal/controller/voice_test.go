@@ -28,6 +28,7 @@ func TestWorkerSendsRequestedVoiceInSameTopic(t *testing.T) {
 	synth := &fakeVoiceSynthesizer{audio: []byte("ID3fake-mp3")}
 	worker := Worker{Repo: repo, AI: ai, Telegram: telegram, Voice: synth, Username: "mybot"}
 	msg := model.Message{MessageID: 17, MessageThreadID: 29, Text: "Бот, запиши голосовое"}
+	mentionTestMessage(&msg, "mybot")
 	msg.Chat.ID = -42
 	if err := worker.Process(context.Background(), model.Update{UpdateID: 17, Message: &msg}); err != nil {
 		t.Fatal(err)
@@ -47,6 +48,7 @@ func TestWorkerReportsVoiceSynthesisFailure(t *testing.T) {
 	telegram := &fakeTelegram{}
 	worker := Worker{Repo: repo, AI: ai, Telegram: telegram, Voice: &fakeVoiceSynthesizer{err: errors.New("gateway down")}, Username: "mybot"}
 	msg := model.Message{MessageID: 17, Text: "Запиши голосовое"}
+	mentionTestMessage(&msg, "mybot")
 	msg.Chat.ID = -42
 	if err := worker.Process(context.Background(), model.Update{UpdateID: 17, Message: &msg}); err != nil {
 		t.Fatal(err)
@@ -63,6 +65,7 @@ func TestWorkerIgnoresVoiceActionForOldMessage(t *testing.T) {
 	synth := &fakeVoiceSynthesizer{audio: []byte("ID3fake-mp3")}
 	worker := Worker{Repo: repo, AI: ai, Telegram: telegram, Voice: synth, Username: "mybot"}
 	msg := model.Message{MessageID: 17, Text: "Новое сообщение"}
+	mentionTestMessage(&msg, "mybot")
 	msg.Chat.ID = -42
 	if err := worker.Process(context.Background(), model.Update{UpdateID: 17, Message: &msg}); err != nil {
 		t.Fatal(err)

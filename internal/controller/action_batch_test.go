@@ -37,6 +37,7 @@ func TestScheduledBatchResumesRemainingActionsWithoutNewAICall(t *testing.T) {
 	repo := &fakeRepo{}
 	for _, input := range []struct{ updateID, messageID int64 }{{1, 10}, {2, 11}} {
 		msg := model.Message{MessageID: input.messageID, Text: "Сделай что-нибудь"}
+		mentionTestMessage(&msg, "mybot")
 		msg.Chat.ID = -42
 		if err := repo.EnqueueUpdate(ctx, model.Update{UpdateID: input.updateID, Message: &msg}, nil); err != nil {
 			t.Fatal(err)
@@ -59,6 +60,7 @@ func TestScheduledBatchResumesRemainingActionsWithoutNewAICall(t *testing.T) {
 		t.Fatalf("first attempt: AI=%d sent=%+v queued=%d plan=%+v memory=%+v", ai.calls, telegram.answers, len(repo.queued), plans.plans[1], repo.important)
 	}
 	third := model.Message{MessageID: 12, Text: "Новое сообщение"}
+	mentionTestMessage(&third, "mybot")
 	third.Chat.ID = -42
 	if err := repo.EnqueueUpdate(ctx, model.Update{UpdateID: 3, Message: &third}, nil); err != nil {
 		t.Fatal(err)

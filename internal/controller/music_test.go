@@ -181,6 +181,7 @@ func TestWorkerStartsMusicFromAIDecision(t *testing.T) {
 	telegram := &fakeTelegram{}
 	worker := Worker{Repo: history, AI: ai, Telegram: telegram, Music: coordinator, Username: "mybot"}
 	msg := model.Message{MessageID: 123, MessageThreadID: 45, Text: "Бот, сделай панк-рок трек"}
+	mentionTestMessage(&msg, "mybot")
 	msg.Chat.ID = -100876
 	if err := worker.Process(context.Background(), model.Update{UpdateID: 123, Message: &msg}); err != nil {
 		t.Fatal(err)

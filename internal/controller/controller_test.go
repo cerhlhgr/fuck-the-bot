@@ -319,27 +319,28 @@ func TestScheduledRunGroupsPendingMessagesByDialogue(t *testing.T) {
 	}
 }
 
-func TestScheduledRunCallsAIOnlyForMentionedMessages(t *testing.T) {
+func TestScheduledRunCallsAIOnlyForMentionOrReplyToBot(t *testing.T) {
 	repo := &fakeRepo{}
 	first := model.Message{MessageID: 10, Text: "Встречаемся в пятницу"}
 	mentioned := model.Message{MessageID: 11, Text: "Во сколько?"}
 	mentionTestMessage(&mentioned, "MyBot")
-	last := model.Message{MessageID: 12, Text: "Уже решили"}
-	for i, msg := range []*model.Message{&first, &mentioned, &last} {
+	reply := model.Message{MessageID: 12, Text: "А ты что думаешь?", ReplyToMessage: &model.Message{MessageID: 5, From: &model.User{ID: 99, IsBot: true}}}
+	last := model.Message{MessageID: 13, Text: "Уже решили"}
+	for i, msg := range []*model.Message{&first, &mentioned, &reply, &last} {
 		msg.Chat.ID = -42
 		if err := repo.EnqueueUpdate(context.Background(), model.Update{UpdateID: int64(i + 1), Message: msg}, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
 	ai := &fakeAI{decision: model.Decision{Action: "silence"}}
-	worker := Worker{Repo: repo, AI: ai, Telegram: &fakeTelegram{}, Username: "MyBot"}
+	worker := Worker{Repo: repo, AI: ai, Telegram: &fakeTelegram{}, BotID: 99, Username: "MyBot"}
 	if err := worker.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if ai.calls != 1 || len(ai.request.NewMessageIDs) != 1 || ai.request.NewMessageIDs[0] != 11 || len(repo.incoming) != 3 || len(repo.queued) != 0 {
+	if ai.calls != 1 || len(ai.request.NewMessageIDs) != 2 || ai.request.NewMessageIDs[0] != 11 || ai.request.NewMessageIDs[1] != 12 || len(ai.request.NewReplyToBotIDs) != 1 || ai.request.NewReplyToBotIDs[0] != 12 || len(repo.incoming) != 4 || len(repo.queued) != 0 {
 		t.Fatalf("mention filter failed: calls=%d new=%v stored=%d pending=%d", ai.calls, ai.request.NewMessageIDs, len(repo.incoming), len(repo.queued))
 	}
-	if len(ai.request.History) != 2 || ai.request.History[0].MessageID != 10 || ai.request.History[1].MessageID != 11 {
+	if len(ai.request.History) != 3 || ai.request.History[0].MessageID != 10 || ai.request.History[1].MessageID != 11 || ai.request.History[2].MessageID != 12 {
 		t.Fatalf("unexpected history around mention: %+v", ai.request.History)
 	}
 }
@@ -530,7 +531,6 @@ func TestWorkerPassesReplyToBotToAI(t *testing.T) {
 	if err := json.Unmarshal([]byte(payload), &item); err != nil {
 		t.Fatal(err)
 	}
-	mentionTestMessage(item.Message, "MyBot")
 	repo := &fakeRepo{}
 	ai := &fakeAI{decision: model.Decision{Reply: "Потому что", ReplyToMessageID: 8}}
 	tg := &fakeTelegram{}
@@ -538,8 +538,22 @@ func TestWorkerPassesReplyToBotToAI(t *testing.T) {
 	if err := worker.Process(context.Background(), item); err != nil {
 		t.Fatal(err)
 	}
-	if !ai.request.CurrentRepliedToBot || ai.request.CurrentReplyToMessageID != 5 || len(tg.messages) != 1 || tg.messages[0].MessageID != 8 {
+	if ai.calls != 1 || !ai.request.CurrentRepliedToBot || ai.request.CurrentReplyToMessageID != 5 || len(ai.request.NewReplyToBotIDs) != 1 || ai.request.NewReplyToBotIDs[0] != 8 || len(tg.messages) != 1 || tg.messages[0].MessageID != 8 {
 		t.Fatalf("reply context was lost: ai=%+v sent=%+v", ai, tg.messages)
+	}
+}
+
+func TestWorkerDoesNotAnswerReplyToAnotherUser(t *testing.T) {
+	repo := &fakeRepo{}
+	ai := &fakeAI{}
+	worker := Worker{Repo: repo, AI: ai, Telegram: &fakeTelegram{}, BotID: 99, Username: "MyBot"}
+	msg := model.Message{MessageID: 9, Text: "А почему?", ReplyToMessage: &model.Message{MessageID: 5, From: &model.User{ID: 7}}}
+	msg.Chat.ID = -42
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 14, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if ai.calls != 0 || len(repo.incoming) != 1 {
+		t.Fatalf("reply to another user triggered AI: calls=%d stored=%d", ai.calls, len(repo.incoming))
 	}
 }
 
@@ -612,6 +626,21 @@ func TestWorkerAnalyzesIncomingPhotoBeforeDecision(t *testing.T) {
 	}
 	if len(photos.sizes) != 1 || photos.sizes[0].FileID != "photo-1" || string(vision.data) != "photo-data" || len(repo.incoming) != 1 || repo.incoming[0].PhotoDescription != "кот сидит на диване" || len(ai.request.History) != 1 || ai.request.History[0].Text != msg.Caption+"\n[На фото: кот сидит на диване]" {
 		t.Fatalf("photo was not added to decision context: photos=%+v vision=%+v incoming=%+v history=%+v", photos, vision, repo.incoming, ai.request.History)
+	}
+}
+
+func TestWorkerAnalyzesPhotoReplyToBotWithoutMention(t *testing.T) {
+	repo := &fakeRepo{}
+	ai := &fakeAI{}
+	vision := &fakePhotoAnalyzer{description: "кот сидит на диване"}
+	worker := Worker{Repo: repo, AI: ai, Telegram: &fakeTelegram{}, Photos: &fakePhotoDownloader{data: []byte("photo-data")}, Vision: vision, BotID: 99, Username: "MyBot"}
+	msg := model.Message{MessageID: 33, Caption: "Что тут?", Photo: []model.PhotoSize{{FileID: "photo-1"}}, ReplyToMessage: &model.Message{MessageID: 5, From: &model.User{ID: 99, IsBot: true}}}
+	msg.Chat.ID = -42
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 23, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if ai.calls != 1 || vision.calls != 1 || len(ai.request.NewReplyToBotIDs) != 1 || ai.request.NewReplyToBotIDs[0] != 33 || len(ai.request.History) != 1 || ai.request.History[0].Text != "Что тут?\n[На фото: кот сидит на диване]" {
+		t.Fatalf("photo reply was not analyzed: ai=%+v vision_calls=%d", ai.request, vision.calls)
 	}
 }
 

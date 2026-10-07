@@ -96,6 +96,10 @@ func (w *Worker) rememberPhoto(hash [32]byte, description string, now time.Time)
 
 const batchPageSize = 500
 
+func (w *Worker) repliedToBot(msg model.Message) bool {
+	return w.BotID != 0 && msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil && msg.ReplyToMessage.From.ID == w.BotID
+}
+
 func (w *Worker) Run(ctx context.Context, interval time.Duration) {
 	log.Printf("scheduled decision worker started interval=%s", interval)
 	defer log.Print("scheduled decision worker stopped")
@@ -219,7 +223,8 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 		msg := *pending.Message
 		log.Printf("message loaded update_id=%d chat_id=%d thread_id=%d message_id=%d", pending.UpdateID, msg.Chat.ID, msg.MessageThreadID, msg.MessageID)
 		_, mentioned := model.MentionedText(msg, w.Username)
-		if mentioned && len(msg.Photo) > 0 && (msg.From == nil || !msg.From.IsBot) && (msg.Date == 0 || !time.Unix(msg.Date, 0).Before(now.Add(-model.ContextLifetime))) {
+		repliedToBot := w.repliedToBot(msg)
+		if (mentioned || repliedToBot) && len(msg.Photo) > 0 && (msg.From == nil || !msg.From.IsBot) && (msg.Date == 0 || !time.Unix(msg.Date, 0).Before(now.Add(-model.ContextLifetime))) {
 			log.Printf("photo analysis started update_id=%d chat_id=%d message_id=%d", pending.UpdateID, msg.Chat.ID, msg.MessageID)
 			if w.Photos == nil || w.Vision == nil {
 				log.Printf("photo analysis unavailable update_id=%d reason=not_configured", pending.UpdateID)
@@ -250,8 +255,8 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 			log.Printf("AI decision skipped update_id=%d reason=message_older_than_one_hour", pending.UpdateID)
 			continue
 		}
-		if !mentioned {
-			log.Printf("AI decision skipped update_id=%d reason=bot_not_mentioned", pending.UpdateID)
+		if !mentioned && !repliedToBot {
+			log.Printf("AI decision skipped update_id=%d reason=no_bot_mention_or_reply", pending.UpdateID)
 			continue
 		}
 		if len(messages) > 0 && (messages[0].Chat.ID != msg.Chat.ID || messages[0].MessageThreadID != msg.MessageThreadID) {
@@ -283,13 +288,13 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 	}
 	for _, current := range messages {
 		request.NewMessageIDs = append(request.NewMessageIDs, current.MessageID)
-		if current.ReplyToMessage != nil && w.BotID != 0 && current.ReplyToMessage.From != nil && current.ReplyToMessage.From.ID == w.BotID {
+		if w.repliedToBot(current) {
 			request.NewReplyToBotIDs = append(request.NewReplyToBotIDs, current.MessageID)
 		}
 	}
 	if msg.ReplyToMessage != nil {
 		request.CurrentReplyToMessageID = msg.ReplyToMessage.MessageID
-		request.CurrentRepliedToBot = w.BotID != 0 && msg.ReplyToMessage.From != nil && msg.ReplyToMessage.From.ID == w.BotID
+		request.CurrentRepliedToBot = w.repliedToBot(msg)
 	}
 	log.Printf("AI decision started chat_id=%d thread_id=%d new_messages=%d context_messages=%d selected_messages=%d important_entries=%d", msg.Chat.ID, msg.MessageThreadID, len(messages), len(history), len(selectedHistory), len(important))
 	started := time.Now()

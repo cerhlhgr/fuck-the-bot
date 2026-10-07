@@ -145,6 +145,7 @@ type DecisionRequest struct {
 	RepliedToBotMessages    []RepliedToBotMessage
 	History                 []HistoryEntry
 	Important               []ImportantEntry
+	Contacts                []Contact
 	MusicEnabled            bool
 	VoiceEnabled            bool
 	SearchEnabled           bool
@@ -162,6 +163,7 @@ type Repository interface {
 	ImportantContext(context.Context, int64, int64) ([]ImportantEntry, error)
 	ApplyImportantBatch(context.Context, []Message, []ImportantUpdate, []int64, time.Time) error
 	FindContacts(context.Context, int64, string) ([]Contact, error)
+	RecentContacts(context.Context, int64, int) ([]Contact, error)
 }
 
 func MentionedText(msg Message, username string) (string, bool) {

@@ -22,6 +22,7 @@ type fakeRepo struct {
 	history              []model.HistoryEntry
 	important            []model.ImportantEntry
 	contacts             map[int64][]model.Contact
+	recentContactsCalls  int
 	importantSourceText  string
 	importantErr         error
 	conversationThreadID int64
@@ -131,6 +132,14 @@ func (f *fakeRepo) FindContacts(_ context.Context, chatID int64, query string) (
 		}
 	}
 	return matches, nil
+}
+func (f *fakeRepo) RecentContacts(_ context.Context, chatID int64, limit int) ([]model.Contact, error) {
+	f.recentContactsCalls++
+	contacts := f.contacts[chatID]
+	if len(contacts) > limit {
+		contacts = contacts[:limit]
+	}
+	return contacts, nil
 }
 func (f *fakeRepo) ApplyImportant(_ context.Context, msg model.Message, summary, kind string, forgetIDs []int64, now time.Time) error {
 	if f.importantErr != nil {

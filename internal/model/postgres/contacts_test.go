@@ -74,6 +74,10 @@ func TestContactsAreRememberedPerChatAndUpdated(t *testing.T) {
 	if err != nil || len(contacts) != 1 || contacts[0].UserID != 456 || contacts[0].Link != "tg://user?id=456" {
 		t.Fatalf("chat contacts mixed or id-only link missing: %+v, %v", contacts, err)
 	}
+	recent, err := store.RecentContacts(ctx, chatID, 100)
+	if err != nil || len(recent) != 1 || recent[0].UserID != 123 || recent[0].Username != "newname" {
+		t.Fatalf("recent contacts incorrect: %+v, %v", recent, err)
+	}
 	bot := model.Message{MessageID: 5, Date: now.Unix(), From: &model.User{ID: 789, IsBot: true, FirstName: "Бот"}}
 	bot.Chat.ID = chatID
 	if err := store.AddIncoming(ctx, bot, now); err != nil {

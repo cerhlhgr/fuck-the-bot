@@ -303,6 +303,12 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 		VoiceEnabled:     w.Voice != nil,
 		SearchEnabled:    w.Search != nil,
 	}
+	if wantsContactMention(messages) {
+		request.Contacts, err = w.Repo.RecentContacts(ctx, msg.Chat.ID, 100)
+		if err != nil {
+			return nil, fmt.Errorf("chat_id=%d load contacts: %w", msg.Chat.ID, err)
+		}
+	}
 	for _, current := range messages {
 		request.NewMessageIDs = append(request.NewMessageIDs, current.MessageID)
 		if w.repliedToBot(current) {

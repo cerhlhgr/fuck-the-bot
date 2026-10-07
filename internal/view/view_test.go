@@ -99,9 +99,15 @@ func TestSystemPromptDescribesWebSearchAvailability(t *testing.T) {
 }
 
 func TestMentionActionUsesContactLookup(t *testing.T) {
-	prompt := SystemPrompt(model.DecisionRequest{BotUsername: "mybot"})
+	prompt := SystemPrompt(model.DecisionRequest{BotUsername: "mybot", Contacts: []model.Contact{{Name: "Игорь", Username: "igor"}, {Name: "Алексей"}}})
 	if !strings.Contains(prompt, `"action":"mention"`) || !strings.Contains(prompt, "contact_query") {
 		t.Fatalf("contact lookup not described in prompt")
+	}
+	if !strings.Contains(prompt, "не проси человека прислать @username") || !strings.Contains(prompt, "по отдельному mention для каждого") {
+		t.Fatal("prompt does not require direct contact lookup for multi-person requests")
+	}
+	if !strings.Contains(prompt, `["Игорь","igor"]`) || !strings.Contains(prompt, `["Алексей",""]`) {
+		t.Fatal("chat contacts missing from prompt")
 	}
 	decision, err := ParseAIDecision(`{"actions":[{"action":"mention","contact_query":"Сергей","reply":"Вот:","reply_to_message_id":123}]}`)
 	if err != nil || len(decision.Actions) != 1 || decision.Actions[0].ContactQuery != "Сергей" || decision.Actions[0].ReplyToMessageID != 123 {

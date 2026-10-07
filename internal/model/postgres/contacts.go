@@ -44,3 +44,33 @@ func (s *Store) FindContacts(ctx context.Context, chatID int64, query string) ([
 	}
 	return contacts, rows.Err()
 }
+
+func (s *Store) RecentContacts(ctx context.Context, chatID int64, limit int) ([]model.Contact, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	rows, err := s.pool.Query(queryCtx, `
+		SELECT user_id, username, display_name, link
+		FROM bot_contacts
+		WHERE chat_id = $1
+		ORDER BY last_seen_at DESC, user_id
+		LIMIT $2`, chatID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var contacts []model.Contact
+	for rows.Next() {
+		var contact model.Contact
+		if err := rows.Scan(&contact.UserID, &contact.Username, &contact.Name, &contact.Link); err != nil {
+			return nil, err
+		}
+		contacts = append(contacts, contact)
+	}
+	return contacts, rows.Err()
+}

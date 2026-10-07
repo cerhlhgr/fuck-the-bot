@@ -27,7 +27,7 @@ func TestWorkerSendsRequestedVoiceInSameTopic(t *testing.T) {
 	telegram := &fakeTelegram{}
 	synth := &fakeVoiceSynthesizer{audio: []byte("ID3fake-mp3")}
 	worker := Worker{Repo: repo, AI: ai, Telegram: telegram, Voice: synth, Username: "mybot"}
-	msg := model.Message{MessageID: 17, MessageThreadID: 29, Text: "Бот, запиши голосовое"}
+	msg := model.Message{MessageID: 17, MessageThreadID: 29, IsTopicMessage: true, Text: "Бот, запиши голосовое"}
 	mentionTestMessage(&msg, "mybot")
 	msg.Chat.ID = -42
 	if err := worker.Process(context.Background(), model.Update{UpdateID: 17, Message: &msg}); err != nil {

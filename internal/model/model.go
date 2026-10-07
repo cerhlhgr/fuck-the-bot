@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,8 @@ const (
 	HistoryLifetime = 24 * time.Hour
 	ContextLifetime = time.Hour
 )
+
+var ErrChatMigrated = errors.New("Telegram group migrated to a supergroup")
 
 type User struct {
 	ID        int64  `json:"id"`
@@ -37,6 +40,7 @@ type PhotoSize struct {
 type Message struct {
 	MessageID       int64 `json:"message_id"`
 	MessageThreadID int64 `json:"message_thread_id"`
+	IsTopicMessage  bool  `json:"is_topic_message"`
 	Date            int64 `json:"date"`
 	Chat            struct {
 		ID int64 `json:"id"`
@@ -54,6 +58,12 @@ type Message struct {
 type Update struct {
 	UpdateID int64    `json:"update_id"`
 	Message  *Message `json:"message"`
+}
+
+func (m *Message) NormalizeThread() {
+	if !m.IsTopicMessage {
+		m.MessageThreadID = 0
+	}
 }
 
 type HistoryEntry struct {
@@ -77,6 +87,12 @@ type ImportantUpdate struct {
 	SourceMessageID int64
 	Summary         string
 	Kind            string
+}
+
+type RepliedToBotMessage struct {
+	UserMessageID int64  `json:"user_message_id"`
+	BotMessageID  int64  `json:"bot_message_id"`
+	BotText       string `json:"bot_text"`
 }
 
 type Decision struct {
@@ -108,6 +124,7 @@ type DecisionRequest struct {
 	CurrentRepliedToBot     bool
 	NewMessageIDs           []int64
 	NewReplyToBotIDs        []int64
+	RepliedToBotMessages    []RepliedToBotMessage
 	History                 []HistoryEntry
 	Important               []ImportantEntry
 	MusicEnabled            bool

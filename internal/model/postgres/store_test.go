@@ -54,7 +54,7 @@ func TestPostgresHistoryAndInbox(t *testing.T) {
 	if err := store.AddIncoming(ctx, older, now); err != nil {
 		t.Fatal(err)
 	}
-	otherTopic := model.Message{MessageID: 8, MessageThreadID: 99, Date: now.Unix(), Text: "другая тема"}
+	otherTopic := model.Message{MessageID: 8, MessageThreadID: 99, IsTopicMessage: true, Date: now.Unix(), Text: "другая тема"}
 	otherTopic.Chat.ID = chatID
 	if err := store.AddIncoming(ctx, otherTopic, now); err != nil {
 		t.Fatal(err)
@@ -231,8 +231,12 @@ func TestPostgresScheduledInboxAndBatchMemory(t *testing.T) {
 	for i := int64(0); i < 3; i++ {
 		msg := model.Message{MessageID: 100 + i, Date: now.Unix(), Text: "сообщение"}
 		msg.Chat.ID = chatID
+		if i == 1 {
+			msg.MessageThreadID = 100 // Regular supergroup reply thread, not a forum topic.
+		}
 		if i == 2 {
 			msg.MessageThreadID = 7
+			msg.IsTopicMessage = true
 		}
 		item := model.Update{UpdateID: updateBase + i, Message: &msg}
 		raw, _ := json.Marshal(item)
@@ -246,7 +250,7 @@ func TestPostgresScheduledInboxAndBatchMemory(t *testing.T) {
 		t.Fatalf("webhook did not immediately store dialogue messages: %+v, %v", history, err)
 	}
 	pending, err := store.PendingUpdates(ctx, 0, 10)
-	if err != nil || len(pending) != 3 || pending[0].UpdateID != updateBase || pending[2].UpdateID != updateBase+2 {
+	if err != nil || len(pending) != 3 || pending[0].UpdateID != updateBase || pending[1].Message.MessageThreadID != 0 || pending[2].Message.MessageThreadID != 7 || pending[2].UpdateID != updateBase+2 {
 		t.Fatalf("wrong pending updates: %+v, %v", pending, err)
 	}
 	if err := store.MarkUpdatesProcessed(ctx, []int64{updateBase, updateBase + 1}); err != nil {

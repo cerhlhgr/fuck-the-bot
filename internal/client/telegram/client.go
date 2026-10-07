@@ -33,6 +33,18 @@ type replyParameters struct {
 	AllowSendingWithoutReply bool  `json:"allow_sending_without_reply"`
 }
 
+type responseParameters struct {
+	MigrateToChatID int64 `json:"migrate_to_chat_id"`
+}
+
+func responseError(status int, description string, params responseParameters, method string) error {
+	message := fmt.Sprintf("Telegram %s HTTP %d: %s", method, status, description)
+	if params.MigrateToChatID != 0 || strings.Contains(strings.ToLower(description), "group chat was upgraded to a supergroup chat") {
+		return fmt.Errorf("%w: %s", model.ErrChatMigrated, message)
+	}
+	return fmt.Errorf("%s", message)
+}
+
 func replyTo(messageID int64) *replyParameters {
 	if messageID <= 0 {
 		return nil
@@ -60,15 +72,16 @@ func (c *Client) call(ctx context.Context, method string, input, output any) err
 	}
 	defer resp.Body.Close()
 	var result struct {
-		OK          bool            `json:"ok"`
-		Description string          `json:"description"`
-		Result      json.RawMessage `json:"result"`
+		OK          bool               `json:"ok"`
+		Description string             `json:"description"`
+		Result      json.RawMessage    `json:"result"`
+		Parameters  responseParameters `json:"parameters"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
 		return fmt.Errorf("decode Telegram response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK || !result.OK {
-		return fmt.Errorf("Telegram HTTP %d: %s", resp.StatusCode, result.Description)
+		return responseError(resp.StatusCode, result.Description, result.Parameters, method)
 	}
 	return json.Unmarshal(result.Result, output)
 }
@@ -234,14 +247,15 @@ func (c *Client) SendVoice(ctx context.Context, original model.Message, audio []
 	}
 	defer resp.Body.Close()
 	var result struct {
-		OK          bool   `json:"ok"`
-		Description string `json:"description"`
+		OK          bool               `json:"ok"`
+		Description string             `json:"description"`
+		Parameters  responseParameters `json:"parameters"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
 		return fmt.Errorf("decode Telegram voice response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK || !result.OK {
-		return fmt.Errorf("Telegram sendVoice HTTP %d: %s", resp.StatusCode, result.Description)
+		return responseError(resp.StatusCode, result.Description, result.Parameters, "sendVoice")
 	}
 	return nil
 }

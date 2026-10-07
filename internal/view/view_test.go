@@ -81,6 +81,16 @@ func TestSystemPromptIncludesPermanentContext(t *testing.T) {
 	}
 }
 
+func TestSystemPromptLinksReplyToBotWithUserMessage(t *testing.T) {
+	prompt := SystemPrompt(model.DecisionRequest{
+		BotUsername: "MyBot", NewMessageIDs: []int64{5508}, NewReplyToBotIDs: []int64{5508},
+		RepliedToBotMessages: []model.RepliedToBotMessage{{UserMessageID: 5508, BotMessageID: 5507, BotText: "Ответ бота"}},
+	})
+	if !strings.Contains(prompt, `"user_message_id":5508`) || !strings.Contains(prompt, `"bot_message_id":5507`) || !strings.Contains(prompt, `"bot_text":"Ответ бота"`) || !strings.Contains(prompt, "укажи user_message_id") {
+		t.Fatal("prompt does not explain how to answer a reply to the bot")
+	}
+}
+
 func TestParseAIDecision(t *testing.T) {
 	batchMemory, err := ParseAIDecision(`{"action":"silence","important_updates":[{"source_message_id":10,"summary":"Встреча в пятницу","kind":"fact"},{"source_message_id":11,"summary":"Не писать до утра","kind":"instruction"}]}`)
 	if err != nil || len(batchMemory.ImportantUpdates) != 2 || batchMemory.ImportantUpdates[0].SourceMessageID != 10 || batchMemory.ImportantUpdates[1].Kind != "instruction" {

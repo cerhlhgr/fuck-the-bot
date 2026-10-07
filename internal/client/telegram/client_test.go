@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -10,6 +11,23 @@ import (
 
 	"fuck-the-bot/internal/model"
 )
+
+func TestChatMigrationErrorCanBeRecognized(t *testing.T) {
+	for _, body := range []string{
+		`{"ok":false,"description":"Bad Request: group chat was upgraded to a supergroup chat","parameters":{"migrate_to_chat_id":-1003953382590}}`,
+		`{"ok":false,"description":"Bad Request: group chat was upgraded to a supergroup chat"}`,
+	} {
+		client := New("test-token")
+		client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 400, Body: io.NopCloser(strings.NewReader(body))}, nil
+		})
+		msg := model.Message{MessageID: 121}
+		msg.Chat.ID = -5081451629
+		if err := client.SendMessage(context.Background(), msg, "Привет"); !errors.Is(err, model.ErrChatMigrated) {
+			t.Fatalf("migration error not recognized: %v", err)
+		}
+	}
+}
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 

@@ -14,15 +14,16 @@ import (
 )
 
 type fakeRepo struct {
-	queued              []model.Update
-	insertErr           error
-	incoming            []model.Message
-	botReplies          []string
-	replyTargets        []int64
-	history             []model.HistoryEntry
-	important           []model.ImportantEntry
-	importantSourceText string
-	importantErr        error
+	queued               []model.Update
+	insertErr            error
+	incoming             []model.Message
+	botReplies           []string
+	replyTargets         []int64
+	history              []model.HistoryEntry
+	important            []model.ImportantEntry
+	importantSourceText  string
+	importantErr         error
+	conversationThreadID int64
 }
 
 func mentionTestMessage(msg *model.Message, username string) {
@@ -113,7 +114,8 @@ func (f *fakeRepo) AddBotReply(_ context.Context, _, _, replyToMessageID int64, 
 	f.replyTargets = append(f.replyTargets, replyToMessageID)
 	return nil
 }
-func (f *fakeRepo) Conversation(context.Context, int64, int64, time.Time) ([]model.HistoryEntry, error) {
+func (f *fakeRepo) Conversation(_ context.Context, _, threadID int64, _ time.Time) ([]model.HistoryEntry, error) {
+	f.conversationThreadID = threadID
 	return f.history, nil
 }
 func (f *fakeRepo) ImportantContext(context.Context, int64, int64) ([]model.ImportantEntry, error) {
@@ -188,6 +190,7 @@ type fakeTelegram struct {
 	answers            []string
 	sendMessageCalls   int
 	sendMessageErrorAt int
+	sendMessageErr     error
 	voiceTargets       []model.Message
 	voices             [][]byte
 	pollTargets        []model.Message
@@ -204,6 +207,9 @@ func (f *fakeTelegram) SendVoice(_ context.Context, msg model.Message, audio []b
 
 func (f *fakeTelegram) SendMessage(_ context.Context, msg model.Message, answer string) error {
 	f.sendMessageCalls++
+	if f.sendMessageErr != nil {
+		return f.sendMessageErr
+	}
 	if f.sendMessageCalls == f.sendMessageErrorAt {
 		return errors.New("Telegram temporarily unavailable")
 	}
@@ -299,7 +305,7 @@ func TestScheduledRunGroupsPendingMessagesByDialogue(t *testing.T) {
 		{3, -43, 0, 20},
 		{4, -42, 7, 30},
 	} {
-		msg := model.Message{MessageID: item.messageID, MessageThreadID: item.threadID, Text: "сообщение"}
+		msg := model.Message{MessageID: item.messageID, MessageThreadID: item.threadID, IsTopicMessage: item.threadID != 0, Text: "сообщение"}
 		mentionTestMessage(&msg, "MyBot")
 		msg.Chat.ID = item.chatID
 		if err := repo.EnqueueUpdate(context.Background(), model.Update{UpdateID: item.updateID, Message: &msg}, nil); err != nil {
@@ -543,6 +549,21 @@ func TestWorkerPassesReplyToBotToAI(t *testing.T) {
 	}
 }
 
+func TestReplyToBotInOrdinarySupergroupKeepsDialogueAndCorrectsTarget(t *testing.T) {
+	repo := &fakeRepo{history: []model.HistoryEntry{{MessageID: 5506, Text: "Начальный вопрос"}, {MessageID: 0, Bot: true, Text: "Ответ бота"}}}
+	ai := &fakeAI{decision: model.Decision{Action: "reply", Reply: "Продолжаю разговор", ReplyToMessageID: 5507}}
+	tg := &fakeTelegram{}
+	worker := Worker{Repo: repo, AI: ai, Telegram: tg, BotID: 99, Username: "MyBot"}
+	msg := model.Message{MessageID: 5508, MessageThreadID: 5506, Text: "А почему?", ReplyToMessage: &model.Message{MessageID: 5507, Text: "Ответ бота", From: &model.User{ID: 99, IsBot: true}}}
+	msg.Chat.ID = -1003953382590
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 478934975, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if ai.calls != 1 || repo.conversationThreadID != 0 || len(ai.request.RepliedToBotMessages) != 1 || ai.request.RepliedToBotMessages[0].BotText != "Ответ бота" || len(tg.messages) != 1 || tg.messages[0].MessageID != 5508 || tg.messages[0].MessageThreadID != 0 || len(repo.replyTargets) != 1 || repo.replyTargets[0] != 5508 {
+		t.Fatalf("reply to bot was lost: AI=%+v thread=%d sent=%+v targets=%+v", ai.request, repo.conversationThreadID, tg.messages, repo.replyTargets)
+	}
+}
+
 func TestWorkerDoesNotAnswerReplyToAnotherUser(t *testing.T) {
 	repo := &fakeRepo{}
 	ai := &fakeAI{}
@@ -562,7 +583,7 @@ func TestWorkerSendsAndStoresPoll(t *testing.T) {
 	ai := &fakeAI{decision: model.Decision{Poll: &model.Poll{Question: "Куда идём?", Options: []string{"В кино", "Домой"}}, ReplyToMessageID: 8}}
 	tg := &fakeTelegram{}
 	worker := Worker{Repo: repo, AI: ai, Telegram: tg, BotID: 99, Username: "MyBot"}
-	msg := model.Message{MessageID: 8, MessageThreadID: 29, Text: "Сделай опрос: куда идём?"}
+	msg := model.Message{MessageID: 8, MessageThreadID: 29, IsTopicMessage: true, Text: "Сделай опрос: куда идём?"}
 	mentionTestMessage(&msg, "MyBot")
 	msg.Chat.ID = -42
 	if err := worker.Process(context.Background(), model.Update{UpdateID: 18, Message: &msg}); err != nil {
@@ -582,7 +603,7 @@ func TestWorkerHandlesImageReactionAndStandaloneMessage(t *testing.T) {
 	tg := &fakeTelegram{}
 	images := &fakeImageSearcher{url: "https://upload.wikimedia.org/cat.jpg"}
 	worker := Worker{Repo: repo, AI: ai, Telegram: tg, Images: images, Username: "MyBot"}
-	msg := model.Message{MessageID: 8, MessageThreadID: 29, Text: "скинь кота"}
+	msg := model.Message{MessageID: 8, MessageThreadID: 29, IsTopicMessage: true, Text: "скинь кота"}
 	mentionTestMessage(&msg, "MyBot")
 	msg.Chat.ID = -42
 	item := model.Update{UpdateID: 20, Message: &msg}

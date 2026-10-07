@@ -147,6 +147,11 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	if len(updates) == 0 {
 		return nil
 	}
+	for i := range updates {
+		if updates[i].Message != nil {
+			updates[i].Message.NormalizeThread()
+		}
+	}
 	type dialogue struct{ chatID, threadID int64 }
 	groups := make(map[dialogue][]model.Update)
 	var order []dialogue
@@ -188,6 +193,11 @@ func (w *Worker) ProcessBatch(ctx context.Context, items []model.Update) error {
 func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int64, error) {
 	if len(items) == 0 {
 		return nil, nil
+	}
+	for i := range items {
+		if items[i].Message != nil {
+			items[i].Message.NormalizeThread()
+		}
 	}
 	updateIDs := make([]int64, 0, len(items))
 	for _, pending := range items {
@@ -290,6 +300,15 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 		request.NewMessageIDs = append(request.NewMessageIDs, current.MessageID)
 		if w.repliedToBot(current) {
 			request.NewReplyToBotIDs = append(request.NewReplyToBotIDs, current.MessageID)
+			botText := model.MessageHistoryText(*current.ReplyToMessage)
+			if botText == "" {
+				botText = "[Не текстовое сообщение бота]"
+			}
+			request.RepliedToBotMessages = append(request.RepliedToBotMessages, model.RepliedToBotMessage{
+				UserMessageID: current.MessageID,
+				BotMessageID:  current.ReplyToMessage.MessageID,
+				BotText:       model.CompactText(botText, 1200),
+			})
 		}
 	}
 	if msg.ReplyToMessage != nil {
@@ -345,6 +364,14 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 	validActions := make([]model.Decision, 0, len(actions))
 	for _, action := range actions {
 		action.Action = decisionAction(action)
+		for i := len(messages) - 1; i >= 0; i-- {
+			current := messages[i]
+			if w.repliedToBot(current) && action.ReplyToMessageID == current.ReplyToMessage.MessageID {
+				log.Printf("AI action target corrected chat_id=%d bot_message_id=%d user_message_id=%d", msg.Chat.ID, action.ReplyToMessageID, current.MessageID)
+				action.ReplyToMessageID = current.MessageID
+				break
+			}
+		}
 		if validActionTarget(action, selectedHistory, messages) {
 			validActions = append(validActions, action)
 		} else {
@@ -410,6 +437,17 @@ func validActionTarget(action model.Decision, history []model.HistoryEntry, mess
 func (w *Worker) executePlan(ctx context.Context, msg model.Message, firstUpdateID int64, plan model.ActionPlan) error {
 	for index := plan.Completed; index < len(plan.Actions); index++ {
 		if err := w.executeAction(ctx, msg, firstUpdateID, plan.Actions[index]); err != nil {
+			if errors.Is(err, model.ErrChatMigrated) {
+				log.Printf("action plan abandoned chat_id=%d thread_id=%d first_update_id=%d reason=chat_migrated remaining=%d", msg.Chat.ID, msg.MessageThreadID, firstUpdateID, len(plan.Actions)-index)
+				if w.ActionPlans != nil {
+					for skipped := index; skipped < len(plan.Actions); skipped++ {
+						if markErr := w.ActionPlans.MarkActionCompleted(ctx, msg.Chat.ID, msg.MessageThreadID, firstUpdateID, skipped); markErr != nil {
+							return fmt.Errorf("mark migrated chat action %d completed: %w", skipped, markErr)
+						}
+					}
+				}
+				return nil
+			}
 			return fmt.Errorf("action %d of %d: %w", index+1, len(plan.Actions), err)
 		}
 		if w.ActionPlans != nil {

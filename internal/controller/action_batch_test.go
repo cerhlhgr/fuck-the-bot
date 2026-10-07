@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"fuck-the-bot/internal/model"
@@ -9,6 +10,37 @@ import (
 
 type fakeActionPlans struct {
 	plans map[int64]model.ActionPlan
+}
+
+func TestMigratedGroupActionPlanStopsRetrying(t *testing.T) {
+	ctx := context.Background()
+	repo := &fakeRepo{}
+	msg := model.Message{MessageID: 121, Text: "@mybot привет"}
+	msg.Chat.ID = -5081451629
+	if err := repo.EnqueueUpdate(ctx, model.Update{UpdateID: 478934937, Message: &msg}, nil); err != nil {
+		t.Fatal(err)
+	}
+	plans := &fakeActionPlans{plans: map[int64]model.ActionPlan{478934937: {
+		UpdateIDs: []int64{478934937},
+		Actions: []model.Decision{
+			{Action: "reply", Reply: "Привет", ReplyToMessageID: 121},
+			{Action: "message", Reply: "Ещё сообщение"},
+		},
+	}}}
+	telegram := &fakeTelegram{sendMessageErr: fmt.Errorf("sendMessage: %w", model.ErrChatMigrated)}
+	worker := Worker{Repo: repo, ActionPlans: plans, AI: &fakeAI{}, Telegram: telegram, Username: "mybot"}
+	if err := worker.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.queued) != 0 || plans.plans[478934937].Completed != 2 || telegram.sendMessageCalls != 1 {
+		t.Fatalf("migrated plan kept retrying: queued=%d completed=%d sends=%d", len(repo.queued), plans.plans[478934937].Completed, telegram.sendMessageCalls)
+	}
+	if err := worker.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if telegram.sendMessageCalls != 1 {
+		t.Fatalf("migrated plan repeated send: %d", telegram.sendMessageCalls)
+	}
 }
 
 func (f *fakeActionPlans) LoadActionPlan(_ context.Context, _, _, firstID int64) (model.ActionPlan, bool, error) {

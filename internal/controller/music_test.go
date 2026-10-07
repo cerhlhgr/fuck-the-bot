@@ -180,7 +180,7 @@ func TestWorkerStartsMusicFromAIDecision(t *testing.T) {
 	ai := &fakeAI{decision: model.Decision{Action: "music", ReplyToMessageID: 123, Music: &model.MusicRequest{Mode: "simple", Prompt: "панк-рок"}}}
 	telegram := &fakeTelegram{}
 	worker := Worker{Repo: history, AI: ai, Telegram: telegram, Music: coordinator, Username: "mybot"}
-	msg := model.Message{MessageID: 123, MessageThreadID: 45, Text: "Бот, сделай панк-рок трек"}
+	msg := model.Message{MessageID: 123, MessageThreadID: 45, IsTopicMessage: true, Text: "Бот, сделай панк-рок трек"}
 	mentionTestMessage(&msg, "mybot")
 	msg.Chat.ID = -100876
 	if err := worker.Process(context.Background(), model.Update{UpdateID: 123, Message: &msg}); err != nil {

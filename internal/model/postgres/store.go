@@ -74,6 +74,9 @@ func (s *Store) tryLock(ctx context.Context, key int64) (func() error, bool, err
 }
 
 func (s *Store) EnqueueUpdate(ctx context.Context, item model.Update, body []byte) error {
+	if item.Message != nil {
+		item.Message.NormalizeThread()
+	}
 	queryCtx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	tx, err := s.pool.Begin(queryCtx)
@@ -119,6 +122,9 @@ func (s *Store) PendingUpdates(ctx context.Context, afterID int64, limit int) ([
 		}
 		if update.UpdateID != id {
 			return nil, fmt.Errorf("queued update %d has mismatched payload ID", id)
+		}
+		if update.Message != nil {
+			update.Message.NormalizeThread()
 		}
 		updates = append(updates, update)
 	}

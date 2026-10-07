@@ -155,20 +155,40 @@ func (s *Store) Conversation(ctx context.Context, chatID, threadID int64, now ti
 	return entries, nil
 }
 
-func (s *Store) AddImportant(ctx context.Context, msg model.Message, summary, kind string, now time.Time) error {
+func (s *Store) ApplyImportant(ctx context.Context, msg model.Message, summary, kind string, forgetIDs []int64, now time.Time) error {
+	if summary == "" && len(forgetIDs) == 0 {
+		return nil
+	}
 	date := time.Unix(msg.Date, 0)
 	if msg.Date == 0 || date.After(now) {
 		date = now
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	_, err := s.pool.Exec(queryCtx, `
+	tx, err := s.pool.Begin(queryCtx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(queryCtx)
+	if len(forgetIDs) > 0 {
+		if _, err := tx.Exec(queryCtx, `
+			DELETE FROM bot_important_context
+			WHERE chat_id = $1 AND thread_id = $2 AND source_message_id = ANY($3)`,
+			msg.Chat.ID, msg.MessageThreadID, forgetIDs); err != nil {
+			return err
+		}
+	}
+	if summary != "" {
+		if _, err := tx.Exec(queryCtx, `
 		INSERT INTO bot_important_context
 		    (chat_id, thread_id, source_message_id, source_sent_at, author, source_body, summary, kind)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (chat_id, source_message_id) DO NOTHING`,
-		msg.Chat.ID, msg.MessageThreadID, msg.MessageID, date, model.AuthorName(msg.From), model.MessageHistoryText(msg), summary, kind)
-	return err
+			msg.Chat.ID, msg.MessageThreadID, msg.MessageID, date, model.AuthorName(msg.From), model.MessageHistoryText(msg), summary, kind); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(queryCtx)
 }
 
 func (s *Store) ImportantContext(ctx context.Context, chatID, threadID int64) ([]model.ImportantEntry, error) {

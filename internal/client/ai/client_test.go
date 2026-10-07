@@ -20,7 +20,7 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 func TestAskSendsSystemPromptWithHistory(t *testing.T) {
-	client := New("test-key", "deepseek/deepseek-v4-pro", "openai/gpt-4.1-mini")
+	client := New("test-key", "openai/gpt-5.4-nano", "openai/gpt-4.1-mini")
 	client.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.String() != endpoint || req.Header.Get("Authorization") != "Bearer test-key" {
 			t.Fatalf("wrong endpoint or authorization")
@@ -35,7 +35,7 @@ func TestAskSendsSystemPromptWithHistory(t *testing.T) {
 		if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
 			t.Fatal(err)
 		}
-		if input.Model != "deepseek/deepseek-v4-pro" || len(input.Messages) != 2 || input.Messages[0].Role != "system" || !strings.Contains(input.Messages[0].Content, `"старое сообщение"`) || !strings.Contains(input.Messages[0].Content, "message_id=17") {
+		if input.Model != "openai/gpt-5.4-nano" || len(input.Messages) != 2 || input.Messages[0].Role != "system" || !strings.Contains(input.Messages[0].Content, `"старое сообщение"`) || !strings.Contains(input.Messages[0].Content, "message_id=17") {
 			t.Fatalf("wrong AI request: %+v", input)
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"reply\":\"Ну привет!\",\"reply_to_message_id\":17}"}}]}`))}, nil
@@ -47,7 +47,7 @@ func TestAskSendsSystemPromptWithHistory(t *testing.T) {
 }
 
 func TestDescribePhotoSendsImageToVisionModel(t *testing.T) {
-	client := New("test-key", "deepseek/deepseek-v4-pro", "openai/gpt-4.1-mini")
+	client := New("test-key", "openai/gpt-5.4-nano", "openai/gpt-4.1-mini")
 	photo := []byte{0xff, 0xd8, 0xff, 0xe0, 0, 16}
 	client.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		var input struct {
@@ -89,7 +89,7 @@ func TestDescribePhotoSendsImageToVisionModel(t *testing.T) {
 }
 
 func TestAskLogsTokenUsageWithoutPromptContent(t *testing.T) {
-	client := New("test-key", "deepseek/deepseek-v4-pro", "openai/gpt-4.1-mini")
+	client := New("test-key", "openai/gpt-5.4-nano", "openai/gpt-4.1-mini")
 	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"action\":\"silence\"}"}}],"usage":{"prompt_tokens":120,"completion_tokens":108,"total_tokens":228,"prompt_tokens_details":{"cached_tokens":60},"completion_tokens_details":{"reasoning_tokens":100}}}`))}, nil
 	})
@@ -108,7 +108,7 @@ func TestAskLogsTokenUsageWithoutPromptContent(t *testing.T) {
 }
 
 func TestAskLogsMissingReasoningUsage(t *testing.T) {
-	client := New("test-key", "deepseek/deepseek-v4-pro", "openai/gpt-4.1-mini")
+	client := New("test-key", "openai/gpt-5.4-nano", "openai/gpt-4.1-mini")
 	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"action\":\"silence\"}"}}],"usage":{"prompt_tokens":120,"completion_tokens":8,"total_tokens":128}}`))}, nil
 	})

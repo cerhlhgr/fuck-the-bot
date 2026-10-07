@@ -42,7 +42,7 @@ func main() {
 		log.Fatal("set TELEGRAM_BOT_TOKEN, TIMEWEB_AI_API_KEY and DATABASE_URL")
 	}
 	if cfg.model == "" {
-		cfg.model = "deepseek/deepseek-v4-pro"
+		cfg.model = "openai/gpt-5.4-nano"
 	}
 	if cfg.visionModel == "" {
 		cfg.visionModel = "openai/gpt-4.1-mini"

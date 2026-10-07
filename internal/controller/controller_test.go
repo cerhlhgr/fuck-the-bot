@@ -59,9 +59,24 @@ func (f *fakeRepo) Conversation(context.Context, int64, int64, time.Time) ([]mod
 func (f *fakeRepo) ImportantContext(context.Context, int64, int64) ([]model.ImportantEntry, error) {
 	return f.important, nil
 }
-func (f *fakeRepo) AddImportant(_ context.Context, msg model.Message, summary, kind string, now time.Time) error {
+func (f *fakeRepo) ApplyImportant(_ context.Context, msg model.Message, summary, kind string, forgetIDs []int64, now time.Time) error {
 	if f.importantErr != nil {
 		return f.importantErr
+	}
+	forget := make(map[int64]bool, len(forgetIDs))
+	for _, id := range forgetIDs {
+		forget[id] = true
+	}
+	kept := f.important[:0]
+	for _, entry := range f.important {
+		if forget[entry.SourceMessageID] {
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	f.important = kept
+	if summary == "" {
+		return nil
 	}
 	for _, entry := range f.important {
 		if entry.SourceMessageID == msg.MessageID {
@@ -227,6 +242,46 @@ func TestWorkerStoresInstructionInPermanentContext(t *testing.T) {
 	}
 	if len(repo.important) != 1 || repo.important[0].Kind != "instruction" || repo.important[0].Summary != ai.decision.Important {
 		t.Fatalf("bot instruction was not stored: %+v", repo.important)
+	}
+}
+
+func TestWorkerForgetsCancelledContextAndReplacesInstruction(t *testing.T) {
+	repo := &fakeRepo{important: []model.ImportantEntry{
+		{SourceMessageID: 10, Summary: "Встреча в пятницу", Kind: "fact"},
+		{SourceMessageID: 11, Summary: "Не писать в чат", Kind: "instruction"},
+	}}
+	ai := &fakeAI{decision: model.Decision{Action: "silence", ForgetImportantIDs: []int64{11}, Important: "Можно писать в чат", ImportantKind: "instruction"}}
+	worker := Worker{Repo: repo, AI: ai, Telegram: &fakeTelegram{}, Username: "MyBot"}
+	msg := model.Message{MessageID: 12, Text: "Бот, снова пиши"}
+	msg.Chat.ID = -42
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 12, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.important) != 2 || repo.important[0].SourceMessageID != 10 || repo.important[1].SourceMessageID != 12 || repo.important[1].Kind != "instruction" {
+		t.Fatalf("wrong context after replacement: %+v", repo.important)
+	}
+	msg.MessageID = 13
+	msg.Text = "Встречу отменили"
+	ai.decision = model.Decision{Action: "silence", ForgetImportantIDs: []int64{10}}
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 13, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.important) != 1 || repo.important[0].SourceMessageID != 12 {
+		t.Fatalf("cancelled fact remained in context: %+v", repo.important)
+	}
+}
+
+func TestWorkerRejectsUnknownImportantContextID(t *testing.T) {
+	repo := &fakeRepo{important: []model.ImportantEntry{{SourceMessageID: 10, Summary: "Встреча", Kind: "fact"}}}
+	ai := &fakeAI{decision: model.Decision{Action: "silence", ForgetImportantIDs: []int64{99}}}
+	worker := Worker{Repo: repo, AI: ai, Telegram: &fakeTelegram{}, Username: "MyBot"}
+	msg := model.Message{MessageID: 12, Text: "Встречу отменили"}
+	msg.Chat.ID = -42
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 12, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.important) != 1 || repo.important[0].SourceMessageID != 10 {
+		t.Fatalf("unknown ID changed context: %+v", repo.important)
 	}
 }
 

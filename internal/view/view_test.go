@@ -66,7 +66,7 @@ func TestSystemPromptIncludesPermanentContext(t *testing.T) {
 	}
 	prompt := SystemPrompt(request)
 	memory := ImportantContext(request.Important)
-	if !strings.Contains(prompt, `"important_type":"instruction"`) || !strings.Contains(memory, `"source_message_id"`) || !strings.Contains(memory, `"kind"`) || !strings.Contains(memory, `2026-10-06T20:00:00Z`) || !strings.Contains(memory, `2026-10-07T08:00:00Z`) || strings.Contains(memory, `source_text`) || strings.Index(memory, request.Important[0].Summary) >= strings.Index(memory, request.Important[1].Summary) || !strings.Contains(prompt, "сравни полные дату и время") {
+	if !strings.Contains(prompt, `"important_type":"instruction"`) || !strings.Contains(prompt, `"forget_important_ids"`) || !strings.Contains(memory, `"source_message_id"`) || !strings.Contains(memory, `"kind"`) || !strings.Contains(memory, `2026-10-06T20:00:00Z`) || !strings.Contains(memory, `2026-10-07T08:00:00Z`) || strings.Contains(memory, `source_text`) || strings.Index(memory, request.Important[0].Summary) >= strings.Index(memory, request.Important[1].Summary) || !strings.Contains(prompt, "сравни полные дату и время") {
 		t.Fatalf("prompt is missing permanent context or output schema: %s", prompt)
 	}
 	other := request
@@ -91,6 +91,14 @@ func TestParseAIDecision(t *testing.T) {
 	instruction, err := ParseAIDecision(`{"action":"silence","important":"Не писать в чат","important_type":"instruction"}`)
 	if err != nil || instruction.ImportantKind != "instruction" || instruction.Important != "Не писать в чат" {
 		t.Fatalf("instruction decision = %+v, %v", instruction, err)
+	}
+	forgotten, err := ParseAIDecision(`{"action":"silence","forget_important_ids":[3,4]}`)
+	if err != nil || len(forgotten.ForgetImportantIDs) != 2 || forgotten.ForgetImportantIDs[0] != 3 || forgotten.ForgetImportantIDs[1] != 4 || forgotten.Important != "" {
+		t.Fatalf("forgotten context decision = %+v, %v", forgotten, err)
+	}
+	replaced, err := ParseAIDecision(`{"action":"silence","forget_important_ids":[3],"important":"Можно писать","important_type":"instruction"}`)
+	if err != nil || len(replaced.ForgetImportantIDs) != 1 || replaced.Important != "Можно писать" || replaced.ImportantKind != "instruction" {
+		t.Fatalf("replacement decision = %+v, %v", replaced, err)
 	}
 	rememberedReply, err := ParseAIDecision(`{"action":"reply","reply":"Принято","reply_to_message_id":17,"important":"Правило беседы"}`)
 	if err != nil || rememberedReply.Reply != "Принято" || rememberedReply.Important != "Правило беседы" {
@@ -127,6 +135,8 @@ func TestParseAIDecision(t *testing.T) {
 	for _, invalid := range []string{
 		`{"action":"silence","important_type":"instruction"}`,
 		`{"action":"silence","important":"Не писать","important_type":"other"}`,
+		`{"action":"silence","forget_important_ids":[0]}`,
+		`{"action":"silence","forget_important_ids":[3,3]}`,
 		`{"reply":"hi","reply_to_message_id":null}`,
 		`{"reply":null,"reply_to_message_id":17}`,
 		"```json\n{\"reply\":\"hi\"}\n```",

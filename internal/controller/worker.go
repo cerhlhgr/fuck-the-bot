@@ -192,15 +192,25 @@ func (w *Worker) Process(ctx context.Context, item model.Update) error {
 		log.Printf("AI decision failed update_id=%d chat_id=%d duration=%s error=%v", item.UpdateID, msg.Chat.ID, time.Since(started), err)
 		return nil
 	}
-	if summary := strings.TrimSpace(decision.Important); summary != "" {
+	if summary := strings.TrimSpace(decision.Important); summary != "" || len(decision.ForgetImportantIDs) > 0 {
+		validIDs := make(map[int64]bool, len(important))
+		for _, entry := range important {
+			validIDs[entry.SourceMessageID] = true
+		}
+		for _, id := range decision.ForgetImportantIDs {
+			if !validIDs[id] {
+				log.Printf("AI selected invalid important context ID update_id=%d chat_id=%d thread_id=%d source_message_id=%d", item.UpdateID, msg.Chat.ID, msg.MessageThreadID, id)
+				return nil
+			}
+		}
 		kind := decision.ImportantKind
 		if kind == "" {
 			kind = "fact"
 		}
-		if err := w.Repo.AddImportant(ctx, msg, summary, kind, now); err != nil {
-			return fmt.Errorf("chat_id=%d message_id=%d save important context: %w", msg.Chat.ID, msg.MessageID, err)
+		if err := w.Repo.ApplyImportant(ctx, msg, summary, kind, decision.ForgetImportantIDs, now); err != nil {
+			return fmt.Errorf("chat_id=%d message_id=%d update important context: %w", msg.Chat.ID, msg.MessageID, err)
 		}
-		log.Printf("important context stored update_id=%d chat_id=%d thread_id=%d message_id=%d", item.UpdateID, msg.Chat.ID, msg.MessageThreadID, msg.MessageID)
+		log.Printf("important context updated update_id=%d chat_id=%d thread_id=%d message_id=%d forgotten=%d stored=%t", item.UpdateID, msg.Chat.ID, msg.MessageThreadID, msg.MessageID, len(decision.ForgetImportantIDs), summary != "")
 	}
 	action := decision.Action
 	if action == "" { // Older callers can still construct a decision without an explicit action.

@@ -77,15 +77,16 @@ type ImportantEntry struct {
 }
 
 type Decision struct {
-	Action           string
-	Important        string
-	ImportantKind    string
-	ReplyToMessageID int64
-	Reply            string
-	Poll             *Poll
-	ImageQuery       string
-	Caption          string
-	Reaction         string
+	Action             string
+	Important          string
+	ImportantKind      string
+	ForgetImportantIDs []int64
+	ReplyToMessageID   int64
+	Reply              string
+	Poll               *Poll
+	ImageQuery         string
+	Caption            string
+	Reaction           string
 }
 
 type Poll struct {
@@ -111,7 +112,7 @@ type Repository interface {
 	AddBotReply(context.Context, int64, int64, int64, string, string, time.Time) error
 	Conversation(context.Context, int64, int64, time.Time) ([]HistoryEntry, error)
 	ImportantContext(context.Context, int64, int64) ([]ImportantEntry, error)
-	AddImportant(context.Context, Message, string, string, time.Time) error
+	ApplyImportant(context.Context, Message, string, string, []int64, time.Time) error
 }
 
 func MentionedText(msg Message, username string) (string, bool) {

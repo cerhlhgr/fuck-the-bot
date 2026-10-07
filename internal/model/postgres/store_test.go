@@ -75,7 +75,7 @@ func TestPostgresHistoryAndInbox(t *testing.T) {
 		{otherTopic, "Факт другой темы", "instruction"},
 		{otherChat, "Факт другого чата", "fact"},
 	} {
-		if err := store.AddImportant(ctx, item.message, item.summary, item.kind, now); err != nil {
+		if err := store.ApplyImportant(ctx, item.message, item.summary, item.kind, nil, now); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -92,10 +92,10 @@ func TestPostgresHistoryAndInbox(t *testing.T) {
 	mute.Chat.ID = chatID
 	unmute := model.Message{MessageID: 12, Date: base.Add(32 * time.Hour).Unix(), Text: "Бот, пиши"}
 	unmute.Chat.ID = chatID
-	if err := store.AddImportant(ctx, unmute, "Можно снова писать в чат", "instruction", now); err != nil {
+	if err := store.ApplyImportant(ctx, unmute, "Можно снова писать в чат", "instruction", nil, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AddImportant(ctx, mute, "Не писать в чат", "instruction", now); err != nil {
+	if err := store.ApplyImportant(ctx, mute, "Не писать в чат", "instruction", nil, now); err != nil {
 		t.Fatal(err)
 	}
 	important, err = store.ImportantContext(ctx, chatID, 0)
@@ -148,5 +148,40 @@ func TestPostgresHistoryAndInbox(t *testing.T) {
 	important, err = store.ImportantContext(ctx, chatID, 0)
 	if err != nil || len(important) != 3 || important[2].Summary != "Старый важный факт" {
 		t.Fatalf("important context was pruned: %+v, %v", important, err)
+	}
+	failed := model.Message{MessageID: 13, Date: now.Unix(), Text: "Испорченная замена"}
+	failed.Chat.ID = chatID
+	if err := store.ApplyImportant(ctx, failed, "Недопустимая запись", "invalid", []int64{mute.MessageID}, now); err == nil {
+		t.Fatal("invalid replacement should roll back forgotten context")
+	}
+	important, err = store.ImportantContext(ctx, chatID, 0)
+	if err != nil || len(important) != 3 {
+		t.Fatalf("failed replacement deleted context: %+v, %v", important, err)
+	}
+	replacement := model.Message{MessageID: 14, Date: now.Unix(), Text: "Новая инструкция"}
+	replacement.Chat.ID = chatID
+	if err := store.ApplyImportant(ctx, replacement, "Писать в чат", "instruction", []int64{mute.MessageID, unmute.MessageID, otherTopic.MessageID, otherChat.MessageID}, now); err != nil {
+		t.Fatal(err)
+	}
+	important, err = store.ImportantContext(ctx, chatID, 0)
+	if err != nil || len(important) != 2 || important[0].SourceMessageID != older.MessageID || important[1].SourceMessageID != replacement.MessageID {
+		t.Fatalf("replacement did not forget previous instructions: %+v, %v", important, err)
+	}
+	otherTopicContext, err := store.ImportantContext(ctx, chatID, otherTopic.MessageThreadID)
+	if err != nil || len(otherTopicContext) != 1 || otherTopicContext[0].SourceMessageID != otherTopic.MessageID {
+		t.Fatalf("replacement deleted another topic: %+v, %v", otherTopicContext, err)
+	}
+	otherChatContext, err := store.ImportantContext(ctx, otherChatID, 0)
+	if err != nil || len(otherChatContext) != 1 || otherChatContext[0].SourceMessageID != otherChat.MessageID {
+		t.Fatalf("replacement deleted another chat: %+v, %v", otherChatContext, err)
+	}
+	cancellation := model.Message{MessageID: 15, Date: now.Unix(), Text: "Старый факт больше не актуален"}
+	cancellation.Chat.ID = chatID
+	if err := store.ApplyImportant(ctx, cancellation, "", "", []int64{older.MessageID}, now); err != nil {
+		t.Fatal(err)
+	}
+	important, err = store.ImportantContext(ctx, chatID, 0)
+	if err != nil || len(important) != 1 || important[0].SourceMessageID != replacement.MessageID {
+		t.Fatalf("cancelled fact remained in permanent context: %+v, %v", important, err)
 	}
 }

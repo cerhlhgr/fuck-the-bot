@@ -91,6 +91,13 @@ func TestSystemPromptLinksReplyToBotWithUserMessage(t *testing.T) {
 	}
 }
 
+func TestSystemPromptDescribesWebSearchAvailability(t *testing.T) {
+	prompt := SystemPrompt(model.DecisionRequest{BotUsername: "mybot", SearchEnabled: true})
+	if !strings.Contains(prompt, `"action":"search"`) || !strings.Contains(prompt, "Общий веб-поиск доступен: true") || strings.Contains(prompt, "%!") {
+		t.Fatalf("web search prompt is incomplete")
+	}
+}
+
 func TestMentionActionUsesContactLookup(t *testing.T) {
 	prompt := SystemPrompt(model.DecisionRequest{BotUsername: "mybot"})
 	if !strings.Contains(prompt, `"action":"mention"`) || !strings.Contains(prompt, "contact_query") {
@@ -154,6 +161,7 @@ func TestParseAIDecision(t *testing.T) {
 		{`{"action":"message","reply":"Всем привет!","reply_to_message_id":null}`, "message"},
 		{`{"action":"poll","poll":{"question":"Куда?","options":["Туда","Сюда"]},"reply_to_message_id":null}`, "poll"},
 		{`{"action":"image","image_query":"cat in sunglasses","caption":"Держи","reply_to_message_id":17}`, "image"},
+		{`{"action":"search","search_type":"videos","search_query":"кот видео","reply_to_message_id":17}`, "search"},
 		{`{"action":"reaction","reaction":"🤡","reply_to_message_id":17}`, "reaction"},
 	} {
 		got, err := ParseAIDecision(test.input)
@@ -185,6 +193,10 @@ func TestParseAIDecision(t *testing.T) {
 		`{"action":"reply","reply":"hello"}`,
 		`{"action":"image","image_query":""}`,
 		`{"action":"image","image_query":"cat","reply":"hello"}`,
+		`{"action":"search","search_type":"other","search_query":"cat","reply_to_message_id":17}`,
+		`{"action":"search","search_type":"web","search_query":"","reply_to_message_id":17}`,
+		`{"action":"search","search_type":"web","search_query":"cat"}`,
+		`{"action":"reply","reply":"hello","search_query":"cat","reply_to_message_id":17}`,
 		`{"action":"reaction","reaction":"🍕","reply_to_message_id":17}`,
 		`{"action":"reaction","reaction":"🤡"}`,
 	} {

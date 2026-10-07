@@ -14,6 +14,7 @@ import (
 
 	"fuck-the-bot/internal/client/ai"
 	"fuck-the-bot/internal/client/images"
+	"fuck-the-bot/internal/client/search"
 	"fuck-the-bot/internal/client/suno"
 	"fuck-the-bot/internal/client/telegram"
 	"fuck-the-bot/internal/client/tts"
@@ -33,6 +34,7 @@ type config struct {
 	sunoAPIURL       string
 	sunoAPIKey       string
 	sunoCallbackURL  string
+	braveSearchKey   string
 }
 
 func main() {
@@ -44,6 +46,7 @@ func main() {
 		sunoAPIURL:      os.Getenv("SUNO_API_URL"),
 		sunoAPIKey:      os.Getenv("SUNO_API_SECRET_KEY"),
 		sunoCallbackURL: os.Getenv("SUNO_API_CALLBACK_URL"),
+		braveSearchKey:  os.Getenv("BRAVE_SEARCH_API_KEY"),
 	}
 	if cfg.telegramToken == "" || cfg.aiKey == "" || cfg.databaseURL == "" {
 		log.Fatal("set TELEGRAM_BOT_TOKEN, TIMEWEB_AI_API_KEY and DATABASE_URL")
@@ -126,6 +129,12 @@ func main() {
 	log.Printf("AI model decision_and_vision=%s", botModel)
 	aiClient := ai.New(cfg.aiKey, botModel, botModel)
 	worker := &controller.Worker{Repo: repo, ActionPlans: repo, AI: aiClient, Telegram: tg, Images: images.New(), Photos: tg, Vision: aiClient, Music: music, Voice: tts.New(cfg.aiKey), BotID: me.ID, Username: me.Username}
+	if cfg.braveSearchKey != "" {
+		worker.Search = search.New(cfg.braveSearchKey)
+		log.Print("Brave web, image, video and news search enabled")
+	} else {
+		log.Print("Brave search disabled: set BRAVE_SEARCH_API_KEY; Wikimedia Commons image search remains available")
+	}
 	var workers sync.WaitGroup
 	workers.Add(1)
 	go func() {

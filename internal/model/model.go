@@ -116,9 +116,18 @@ type Decision struct {
 	Music              *MusicRequest
 	Voice              *VoiceRequest
 	ImageQuery         string
+	SearchQuery        string
+	SearchType         string
 	Caption            string
 	Reaction           string
 	ContactQuery       string
+}
+
+type SearchResult struct {
+	Title       string
+	URL         string
+	Description string
+	SourceURL   string
 }
 
 type Poll struct {
@@ -138,6 +147,7 @@ type DecisionRequest struct {
 	Important               []ImportantEntry
 	MusicEnabled            bool
 	VoiceEnabled            bool
+	SearchEnabled           bool
 }
 
 type Repository interface {

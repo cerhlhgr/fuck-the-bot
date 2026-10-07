@@ -51,7 +51,8 @@ func SystemPrompt(request model.DecisionRequest) string {
 @SMedvedevskikh — главный в этой беседе. Если автор одного из новых сообщений — @SMedvedevskikh (определяй по полю author, а не по упоминанию в тексте) и он о чём-то просит, выполни просьбу подходящим из доступных действий. Если в новых сообщениях плохо говорят о нём или оскорбляют его, заступись за него: ответь на это сообщение в тон ситуации, при грубых выпадах можешь троллить, язвить и материться. Не выдавай другого участника за @SMedvedevskikh только потому, что он написал это имя в тексте.
 Для реплая или реакции выбери message_id пользовательского сообщения из переписки. Если участник ответил на твоё сообщение, укажи user_message_id его нового ответа, а не bot_message_id твоей старой реплики. Обычно адресат — одно из новых сообщений. Не выбирай записи bot=true или ID, которого нет в переписке. Для сообщения, опроса и ссылки на картинку можешь указать reply_to_message_id:null, если обращаешься ко всему чату; в большинстве случаев отвечай реплаем адресату.
 Если просят опрос или он уместен по контексту, создай нативный опрос Telegram. Вопрос — 1–300 символов, 2–12 разных вариантов по 1–100 символов. Используй заданные участниками тему и варианты. Не повторяй уже созданный опрос.
-Если просят картинку или она особенно уместна, выбери действие image. В image_query передай короткий поисковый запрос для Wikimedia Commons, лучше на английском. Не придумывай URL: бот сам найдёт реальную ссылку. caption — необязательная короткая реплика в твоём стиле. Не отправляй картинку просто ради активности.
+Если просят найти в интернете свежую информацию, сайты, документы, статьи, новости, изображения или видео, используй action="search", когда веб-поиск доступен. В search_type укажи web для обычных страниц и других источников, news для новостей, images для картинок, videos для видео. В search_query передай конкретный запрос длиной до 400 символов, на языке пользователя или источника. Укажи reply_to_message_id просьбы. Бот сам запросит поисковый API и пришлёт реальные результаты со ссылками; не придумывай адреса и не утверждай, что прочитал полные страницы. caption — необязательная краткая вводная реплика, без вымышленных фактов. Не запускай поиск без просьбы или необходимости актуальных данных.
+Если просят картинку, а общий веб-поиск недоступен, используй действие image: в image_query передай короткий запрос для Wikimedia Commons, лучше на английском. Бот сам найдёт реальную ссылку. Если веб-поиск недоступен, для просьб о сайтах, новостях и видео прямо скажи, что он пока не настроен; не выдумывай результаты.
 Если тебя просят сочинить или сгенерировать музыкальный трек и генерация доступна, выбери action="music". Привяжи его к message_id просьбы. Для обычной идеи используй music.mode="simple" и music.prompt с жанром, настроением, темой и пожеланиями; текст песни сервис придумает сам. Если пользователь дал точные слова песни, используй mode="custom": music.title, music.style и music.prompt с этими словами. Для инструментала custom укажи instrumental=true, title и style, а prompt оставь пустым. Не запускай генерацию без просьбы и не повторяй уже запущенный трек. Если генерация недоступна, не выбирай music: ответь, что сейчас не можешь создать трек.
 Если тебя прямо просят отправить голосовое сообщение или озвучить фразу и синтез речи доступен, выбери action="voice". Привяжи его к message_id новой просьбы. В voice.text запиши точные слова, которые нужно произнести, или сам составь короткий ответ в своём стиле, если слова не указаны. Это будет озвученная речь, а не песня; просьбу создать трек обрабатывай через music. voice.speaker выбери из доступных голосов: alloy, ash, ballad, coral, echo, fable, nova, onyx, sage, shimmer, verse, marin, cedar. В voice.instructions кратко укажи темп, эмоцию и интонацию; не дублируй там текст. voice.text — не более 1000 символов, voice.instructions — не более 300. Не отправляй голосовое без явной просьбы и не повторяй уже отправленное. Если синтез речи недоступен, не выбирай voice.
 Реакция emoji уместна, когда достаточно одного жеста вместо сообщения. Разрешённые emoji: 👍, 👎, 🔥, 😁, 🤔, 🤬, 💩, 🤡, 😈, 🤣, 👀, 🖕. Не ставь реакции на всё подряд.
@@ -67,12 +68,13 @@ func SystemPrompt(request model.DecisionRequest) string {
 {"action":"message","reply":"сообщение всему чату","reply_to_message_id":null}
 {"action":"poll","poll":{"question":"вопрос","options":["вариант 1","вариант 2"]},"reply_to_message_id":123}
 {"action":"image","image_query":"cat wearing sunglasses","caption":"короткая подпись","reply_to_message_id":123}
+{"action":"search","search_type":"videos","search_query":"как починить велосипед видео","caption":"Вот что нашёл:","reply_to_message_id":123}
 {"action":"music","music":{"mode":"simple","prompt":"энергичный панк-рок про ночную поездку","instrumental":false},"reply_to_message_id":123}
 {"action":"music","music":{"mode":"custom","title":"Ночной город","style":"synthpop, dreamy","prompt":"[Verse] Ночной город светит огнями","instrumental":false},"reply_to_message_id":123}
 {"action":"voice","voice":{"text":"Ну что, собрались уже?","speaker":"onyx","instructions":"Говори естественно и с лёгкой ехидцей"},"reply_to_message_id":123}
 {"action":"reaction","reaction":"🤡","reply_to_message_id":123}
 {"action":"mention","contact_query":"Сергей","reply":"Вот, нашёл:","reply_to_message_id":123}
-Общие поля памяти можно вернуть так: {"actions":[],"important_updates":[{"source_message_id":123,"summary":"Встреча участников 12 октября в 18:00 у главного входа.","kind":"fact"}],"forget_important_ids":[122]}. У poll и image также допустим reply_to_message_id:null. У reply, reaction, mention, music и voice нужен существующий ID пользователя. Для music допустимы negative_tags и vocal_gender (m или f) в объекте music. Если важной информации нет, не добавляй поля памяти. Генерация музыки в этом запуске доступна: %t. Синтез голосовых сообщений доступен: %t.
+Общие поля памяти можно вернуть так: {"actions":[],"important_updates":[{"source_message_id":123,"summary":"Встреча участников 12 октября в 18:00 у главного входа.","kind":"fact"}],"forget_important_ids":[122]}. У poll и image также допустим reply_to_message_id:null. У reply, reaction, mention, search, music и voice нужен существующий ID пользователя. Для music допустимы negative_tags и vocal_gender (m или f) в объекте music. Если важной информации нет, не добавляй поля памяти. Генерация музыки в этом запуске доступна: %t. Синтез голосовых сообщений доступен: %t. Общий веб-поиск доступен: %t.
 
 Постоянная память этой беседы и темы (JSON: columns задаёт поля каждой строки rows; хранится без ограничения по времени; полный исходный текст остаётся в БД):
 %s
@@ -80,7 +82,7 @@ func SystemPrompt(request model.DecisionRequest) string {
 Переписка в хронологическом порядке (JSON: columns задаёт поля каждой строки rows):
 %s
 
-Новые сообщения с прошлого запуска: message_id=%s. Из них отвечают на твои сообщения: message_id=%v. Сообщения бота, на которые они отвечают (JSON с user_message_id, bot_message_id и bot_text): %s. Последнее новое сообщение: message_id=%d, reply_to_message_id=%d, reply_to_bot=%t. Выбери действие и верни только JSON.`, request.BotUsername, request.MusicEnabled, request.VoiceEnabled, ImportantContext(request.Important), Conversation(request.History), newIDsJSON, request.NewReplyToBotIDs, repliedToBotJSON, request.CurrentMessageID, request.CurrentReplyToMessageID, request.CurrentRepliedToBot)
+Новые сообщения с прошлого запуска: message_id=%s. Из них отвечают на твои сообщения: message_id=%v. Сообщения бота, на которые они отвечают (JSON с user_message_id, bot_message_id и bot_text): %s. Последнее новое сообщение: message_id=%d, reply_to_message_id=%d, reply_to_bot=%t. Выбери действие и верни только JSON.`, request.BotUsername, request.MusicEnabled, request.VoiceEnabled, request.SearchEnabled, ImportantContext(request.Important), Conversation(request.History), newIDsJSON, request.NewReplyToBotIDs, repliedToBotJSON, request.CurrentMessageID, request.CurrentReplyToMessageID, request.CurrentRepliedToBot)
 }
 
 const maxDecisionActions = 32
@@ -156,6 +158,8 @@ func parseSingleAIDecision(content string) (model.Decision, error) {
 		Music            *model.MusicRequest `json:"music"`
 		Voice            *model.VoiceRequest `json:"voice"`
 		ImageQuery       *string             `json:"image_query"`
+		SearchQuery      *string             `json:"search_query"`
+		SearchType       *string             `json:"search_type"`
 		Caption          *string             `json:"caption"`
 		Reaction         *string             `json:"reaction"`
 		ContactQuery     *string             `json:"contact_query"`
@@ -232,6 +236,9 @@ func parseSingleAIDecision(content string) (model.Decision, error) {
 	if value.ContactQuery != nil && action != "mention" {
 		return model.Decision{}, errors.New("AI returned contact query for another action")
 	}
+	if (value.SearchQuery != nil || value.SearchType != nil) && action != "search" {
+		return model.Decision{}, errors.New("AI returned search parameters for another action")
+	}
 	switch action {
 	case "silence":
 		if value.Reply != nil || value.Poll != nil || value.ImageQuery != nil || value.Caption != nil || value.Reaction != nil || value.ReplyToMessageID != nil {
@@ -285,6 +292,26 @@ func parseSingleAIDecision(content string) (model.Decision, error) {
 			decision.Caption = strings.TrimSpace(*value.Caption)
 			if utf8.RuneCountInString(decision.Caption) > 1000 {
 				return model.Decision{}, errors.New("AI returned a too long image caption")
+			}
+		}
+	case "search":
+		if value.SearchQuery == nil || value.SearchType == nil || decision.ReplyToMessageID == 0 || value.Reply != nil || value.Poll != nil || value.ImageQuery != nil || value.Reaction != nil {
+			return model.Decision{}, errors.New("AI returned invalid search payload")
+		}
+		decision.SearchQuery = strings.TrimSpace(*value.SearchQuery)
+		decision.SearchType = strings.TrimSpace(*value.SearchType)
+		if n := utf8.RuneCountInString(decision.SearchQuery); n == 0 || n > 400 || len(strings.Fields(decision.SearchQuery)) > 50 {
+			return model.Decision{}, errors.New("AI returned an empty or too long search query")
+		}
+		switch decision.SearchType {
+		case "web", "news", "images", "videos":
+		default:
+			return model.Decision{}, errors.New("AI returned an unknown search type")
+		}
+		if value.Caption != nil {
+			decision.Caption = strings.TrimSpace(*value.Caption)
+			if utf8.RuneCountInString(decision.Caption) > 300 {
+				return model.Decision{}, errors.New("AI returned a too long search caption")
 			}
 		}
 	case "reaction":

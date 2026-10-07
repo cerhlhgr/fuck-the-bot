@@ -44,6 +44,10 @@ func (c *Client) Search(ctx context.Context, query string) (string, error) {
 	req.Header.Set("User-Agent", "ShalunishkaBot/1.0 (Telegram bot image lookup)")
 	resp, err := c.http.Do(req)
 	if err != nil {
+		var requestError *url.Error
+		if errors.As(err, &requestError) {
+			err = requestError.Err
+		}
 		return "", fmt.Errorf("search Wikimedia Commons: %w", err)
 	}
 	defer resp.Body.Close()

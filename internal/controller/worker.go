@@ -29,6 +29,10 @@ type ImageSearcher interface {
 	Search(context.Context, string) (string, error)
 }
 
+type WebSearcher interface {
+	Search(context.Context, string, string) ([]model.SearchResult, error)
+}
+
 type PhotoDownloader interface {
 	DownloadPhoto(context.Context, []model.PhotoSize) ([]byte, error)
 }
@@ -51,6 +55,7 @@ type Worker struct {
 	AI          AI
 	Telegram    Messenger
 	Images      ImageSearcher
+	Search      WebSearcher
 	Photos      PhotoDownloader
 	Vision      PhotoAnalyzer
 	Music       MusicStarter
@@ -296,6 +301,7 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 		Important:        important,
 		MusicEnabled:     w.Music != nil,
 		VoiceEnabled:     w.Voice != nil,
+		SearchEnabled:    w.Search != nil,
 	}
 	for _, current := range messages {
 		request.NewMessageIDs = append(request.NewMessageIDs, current.MessageID)
@@ -424,7 +430,7 @@ func validActionTarget(action model.Decision, history []model.HistoryEntry, mess
 	if !found {
 		return false
 	}
-	if action.Action == "voice" || action.Action == "music" || action.Action == "mention" {
+	if action.Action == "voice" || action.Action == "music" || action.Action == "mention" || action.Action == "search" {
 		for _, message := range messages {
 			if message.MessageID == id {
 				return true
@@ -486,8 +492,29 @@ func (w *Worker) executeAction(ctx context.Context, msg model.Message, updateID 
 		storedText = decision.Reply
 		log.Printf("Telegram message sent update_id=%d chat_id=%d reply_to_message_id=%d", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID)
 	case "image":
-		if w.Images == nil {
+		if w.Images == nil && w.Search == nil {
 			return errors.New("image searcher is not configured")
+		}
+		if w.Search != nil {
+			results, err := w.Search.Search(ctx, "images", decision.ImageQuery)
+			if err == nil && len(results) > 0 {
+				storedText = formatSearchResults("images", decision.Caption, results)
+			} else if err != nil {
+				log.Printf("image web search failed update_id=%d chat_id=%d error=%v", item.UpdateID, msg.Chat.ID, err)
+			}
+		}
+		if storedText != "" {
+			if err := w.Telegram.SendMessage(ctx, target, storedText); err != nil {
+				return fmt.Errorf("chat_id=%d message_id=%d send image search results: %w", msg.Chat.ID, msg.MessageID, err)
+			}
+			break
+		}
+		if w.Images == nil {
+			storedText = "Картинку по запросу не нашёл."
+			if err := w.Telegram.SendMessage(ctx, target, storedText); err != nil {
+				return fmt.Errorf("chat_id=%d message_id=%d send image search result: %w", msg.Chat.ID, msg.MessageID, err)
+			}
+			break
 		}
 		imageURL, err := w.Images.Search(ctx, decision.ImageQuery)
 		if err != nil {
@@ -504,6 +531,35 @@ func (w *Worker) executeAction(ctx context.Context, msg model.Message, updateID 
 			return fmt.Errorf("chat_id=%d message_id=%d send image link: %w", msg.Chat.ID, msg.MessageID, err)
 		}
 		log.Printf("Telegram image link sent update_id=%d chat_id=%d reply_to_message_id=%d", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID)
+	case "search":
+		if w.Search == nil {
+			if decision.SearchType == "images" && w.Images != nil {
+				if imageURL, err := w.Images.Search(ctx, decision.SearchQuery); err == nil {
+					storedText = formatSearchResults("images", decision.Caption, []model.SearchResult{{Title: "Изображение", URL: imageURL}})
+				}
+			}
+			if storedText == "" {
+				storedText = "Поиск в интернете пока не настроен."
+			}
+		} else {
+			results, err := w.Search.Search(ctx, decision.SearchType, decision.SearchQuery)
+			if decision.SearchType == "images" && (err != nil || len(results) == 0) && w.Images != nil {
+				if imageURL, fallbackErr := w.Images.Search(ctx, decision.SearchQuery); fallbackErr == nil {
+					results = []model.SearchResult{{Title: "Изображение", URL: imageURL}}
+					err = nil
+				}
+			}
+			if err != nil {
+				log.Printf("web search failed update_id=%d chat_id=%d type=%s error=%v", item.UpdateID, msg.Chat.ID, decision.SearchType, err)
+				storedText = "Поиск сейчас не сработал. Попробуй ещё раз позже."
+			} else {
+				storedText = formatSearchResults(decision.SearchType, decision.Caption, results)
+			}
+		}
+		if err := w.Telegram.SendMessage(ctx, target, storedText); err != nil {
+			return fmt.Errorf("chat_id=%d message_id=%d send search results: %w", msg.Chat.ID, msg.MessageID, err)
+		}
+		log.Printf("Telegram search results sent update_id=%d chat_id=%d type=%s reply_to_message_id=%d", item.UpdateID, msg.Chat.ID, decision.SearchType, decision.ReplyToMessageID)
 	case "reaction":
 		if err := w.Telegram.SetReaction(ctx, target, decision.Reaction); err != nil {
 			log.Printf("Telegram reaction unavailable update_id=%d chat_id=%d reply_to_message_id=%d error=%v", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID, err)

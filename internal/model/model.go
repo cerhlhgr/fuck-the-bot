@@ -80,6 +80,7 @@ type ImportantUpdate struct {
 }
 
 type Decision struct {
+	Actions            []Decision
 	Action             string
 	Important          string
 	ImportantKind      string

@@ -50,7 +50,7 @@ func TestConversationIncludesAllMessages(t *testing.T) {
 		t.Fatalf("history data was lost: first=%d last=%d reply_to=%d bot=%t text_length=%d", firstID, lastID, lastReplyTo, lastBot, len([]rune(lastText)))
 	}
 	prompt := SystemPrompt(model.DecisionRequest{BotUsername: "MyBot", CurrentMessageID: 85, History: entries})
-	if !strings.Contains(prompt, "последний час") || !strings.Contains(prompt, "message_id=85") || !strings.Contains(prompt, `"action":"silence"`) || !strings.Contains(prompt, `"action":"poll"`) || !strings.Contains(prompt, `"action":"image"`) || !strings.Contains(prompt, `"action":"reaction"`) {
+	if !strings.Contains(prompt, "последний час") || !strings.Contains(prompt, "message_id=85") || !strings.Contains(prompt, `"actions":[]`) || !strings.Contains(prompt, `"action":"poll"`) || !strings.Contains(prompt, `"action":"image"`) || !strings.Contains(prompt, `"action":"reaction"`) {
 		t.Fatal("system prompt is missing the context or available actions")
 	}
 }
@@ -166,6 +166,29 @@ func TestParseAIDecision(t *testing.T) {
 	} {
 		if _, err := ParseAIDecision(invalid); err == nil {
 			t.Errorf("accepted %q", invalid)
+		}
+	}
+}
+
+func TestParseAIBatchActions(t *testing.T) {
+	decision, err := ParseAIDecision(`{"actions":[{"action":"reply","reply":"Привет","reply_to_message_id":10},{"action":"poll","poll":{"question":"Куда?","options":["Домой","В кино"]},"reply_to_message_id":11}],"important_updates":[{"source_message_id":11,"summary":"Встреча 12 октября в 18:00","kind":"fact"}]}`)
+	if err != nil || len(decision.Actions) != 2 || decision.Actions[0].Action != "reply" || decision.Actions[0].ReplyToMessageID != 10 || decision.Actions[1].Poll == nil || len(decision.ImportantUpdates) != 1 {
+		t.Fatalf("batch decision = %+v, %v", decision, err)
+	}
+	silent, err := ParseAIDecision(`{"actions":[],"forget_important_ids":[9]}`)
+	if err != nil || len(silent.Actions) != 0 || len(silent.ForgetImportantIDs) != 1 {
+		t.Fatalf("empty action batch = %+v, %v", silent, err)
+	}
+	for _, input := range []string{
+		`{"actions":null}`,
+		`{"actions":{}}`,
+		`{"actions":[{"action":"silence"}]}`,
+		`{"actions":[{"action":"reply","reply":"Привет","reply_to_message_id":10,"important_updates":[{"source_message_id":10,"summary":"Факт","kind":"fact"}]}]}`,
+		`{"actions":[{"action":"reply","reply":"Привет","reply_to_message_id":10}],"action":"message"}`,
+		`{"actions":[{"action":"reply","reply":"Привет","reply_to_message_id":10},{"action":"voice","voice":{"text":""},"reply_to_message_id":11}]}`,
+	} {
+		if _, err := ParseAIDecision(input); err == nil {
+			t.Fatalf("accepted invalid batch: %s", input)
 		}
 	}
 }

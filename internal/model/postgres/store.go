@@ -150,7 +150,10 @@ func (s *Store) Prune(ctx context.Context, now time.Time) error {
 	if _, err := s.pool.Exec(queryCtx, `DELETE FROM bot_updates WHERE processed_at < $1`, now.Add(-48*time.Hour)); err != nil {
 		return err
 	}
-	return s.pruneMusic(ctx, now)
+	if err := s.pruneMusic(ctx, now); err != nil {
+		return err
+	}
+	return s.pruneActionPlans(ctx, now)
 }
 
 func (s *Store) AddIncoming(ctx context.Context, msg model.Message, now time.Time) error {

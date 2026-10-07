@@ -160,14 +160,16 @@ func (f *fakeAI) Ask(_ context.Context, request model.DecisionRequest) (model.De
 }
 
 type fakeTelegram struct {
-	messages        []model.Message
-	answers         []string
-	voiceTargets    []model.Message
-	voices          [][]byte
-	pollTargets     []model.Message
-	polls           []model.Poll
-	reactionTargets []model.Message
-	reactions       []string
+	messages           []model.Message
+	answers            []string
+	sendMessageCalls   int
+	sendMessageErrorAt int
+	voiceTargets       []model.Message
+	voices             [][]byte
+	pollTargets        []model.Message
+	polls              []model.Poll
+	reactionTargets    []model.Message
+	reactions          []string
 }
 
 func (f *fakeTelegram) SendVoice(_ context.Context, msg model.Message, audio []byte) error {
@@ -177,6 +179,10 @@ func (f *fakeTelegram) SendVoice(_ context.Context, msg model.Message, audio []b
 }
 
 func (f *fakeTelegram) SendMessage(_ context.Context, msg model.Message, answer string) error {
+	f.sendMessageCalls++
+	if f.sendMessageCalls == f.sendMessageErrorAt {
+		return errors.New("Telegram temporarily unavailable")
+	}
 	f.messages = append(f.messages, msg)
 	f.answers = append(f.answers, answer)
 	return nil

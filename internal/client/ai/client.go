@@ -46,7 +46,7 @@ func (c *Client) Ask(ctx context.Context, decisionRequest model.DecisionRequest)
 		struct {
 			Role    string `json:"role"`
 			Content string `json:"content"`
-		}{"user", "Оцени новые сообщения за период и выбери одно уместное действие для беседы. Верни только JSON."},
+		}{"user", "Оцени все новые сообщения за период. Верни один JSON-объект со списком уместных действий actions и общими изменениями памяти беседы."},
 	)
 	content, err := c.completion(ctx, input, "decision", c.model)
 	if err != nil {

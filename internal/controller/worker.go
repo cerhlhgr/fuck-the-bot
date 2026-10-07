@@ -45,18 +45,19 @@ type VoiceSynthesizer interface {
 }
 
 type Worker struct {
-	Repo       model.Repository
-	AI         AI
-	Telegram   Messenger
-	Images     ImageSearcher
-	Photos     PhotoDownloader
-	Vision     PhotoAnalyzer
-	Music      MusicStarter
-	Voice      VoiceSynthesizer
-	BotID      int64
-	Username   string
-	photoMu    sync.Mutex
-	photoCache map[[32]byte]photoCacheEntry
+	Repo        model.Repository
+	ActionPlans model.ActionPlanStore
+	AI          AI
+	Telegram    Messenger
+	Images      ImageSearcher
+	Photos      PhotoDownloader
+	Vision      PhotoAnalyzer
+	Music       MusicStarter
+	Voice       VoiceSynthesizer
+	BotID       int64
+	Username    string
+	photoMu     sync.Mutex
+	photoCache  map[[32]byte]photoCacheEntry
 }
 
 const photoCacheLifetime = 24 * time.Hour
@@ -157,18 +158,15 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	}
 	for _, key := range order {
 		items := groups[key]
-		if err := w.ProcessBatch(ctx, items); err != nil {
+		processedIDs, err := w.processBatch(ctx, items)
+		if err != nil {
 			log.Printf("process dialogue batch chat_id=%d thread_id=%d first_update_id=%d count=%d: %v", key.chatID, key.threadID, items[0].UpdateID, len(items), err)
 			continue
 		}
-		ids := make([]int64, 0, len(items))
-		for _, item := range items {
-			ids = append(ids, item.UpdateID)
-		}
-		if err := w.Repo.MarkUpdatesProcessed(ctx, ids); err != nil {
+		if err := w.Repo.MarkUpdatesProcessed(ctx, processedIDs); err != nil {
 			return fmt.Errorf("mark dialogue batch processed: %w", err)
 		}
-		log.Printf("dialogue batch processed chat_id=%d thread_id=%d updates=%d", key.chatID, key.threadID, len(items))
+		log.Printf("dialogue batch processed chat_id=%d thread_id=%d updates=%d", key.chatID, key.threadID, len(processedIDs))
 	}
 	return nil
 }
@@ -179,8 +177,32 @@ func (w *Worker) Process(ctx context.Context, item model.Update) error {
 }
 
 func (w *Worker) ProcessBatch(ctx context.Context, items []model.Update) error {
+	_, err := w.processBatch(ctx, items)
+	return err
+}
+
+func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int64, error) {
 	if len(items) == 0 {
-		return nil
+		return nil, nil
+	}
+	updateIDs := make([]int64, 0, len(items))
+	for _, pending := range items {
+		updateIDs = append(updateIDs, pending.UpdateID)
+	}
+	firstUpdateID := items[0].UpdateID
+	if w.ActionPlans != nil && items[0].Message != nil {
+		first := items[0].Message
+		plan, found, err := w.ActionPlans.LoadActionPlan(ctx, first.Chat.ID, first.MessageThreadID, firstUpdateID)
+		if err != nil {
+			return nil, fmt.Errorf("load action plan: %w", err)
+		}
+		if found {
+			log.Printf("resuming action plan chat_id=%d thread_id=%d first_update_id=%d completed=%d total=%d", first.Chat.ID, first.MessageThreadID, firstUpdateID, plan.Completed, len(plan.Actions))
+			if err := w.executePlan(ctx, *first, firstUpdateID, plan); err != nil {
+				return nil, err
+			}
+			return plan.UpdateIDs, nil
+		}
 	}
 	now := time.Now()
 	var messages []model.Message
@@ -217,7 +239,7 @@ func (w *Worker) ProcessBatch(ctx context.Context, items []model.Update) error {
 			}
 		}
 		if err := w.Repo.AddIncoming(ctx, msg, now); err != nil {
-			return fmt.Errorf("chat_id=%d message_id=%d save incoming message: %w", msg.Chat.ID, msg.MessageID, err)
+			return nil, fmt.Errorf("chat_id=%d message_id=%d save incoming message: %w", msg.Chat.ID, msg.MessageID, err)
 		}
 		if msg.From != nil && msg.From.IsBot {
 			log.Printf("AI decision skipped update_id=%d reason=other_bot_message", pending.UpdateID)
@@ -228,23 +250,23 @@ func (w *Worker) ProcessBatch(ctx context.Context, items []model.Update) error {
 			continue
 		}
 		if len(messages) > 0 && (messages[0].Chat.ID != msg.Chat.ID || messages[0].MessageThreadID != msg.MessageThreadID) {
-			return errors.New("dialogue batch spans multiple chats or topics")
+			return nil, errors.New("dialogue batch spans multiple chats or topics")
 		}
 		messages = append(messages, msg)
 		item = pending
 	}
 	if len(messages) == 0 {
-		return nil
+		return updateIDs, nil
 	}
 	msg := messages[len(messages)-1]
 	history, err := w.Repo.Conversation(ctx, msg.Chat.ID, msg.MessageThreadID, now)
 	if err != nil {
-		return fmt.Errorf("chat_id=%d load conversation: %w", msg.Chat.ID, err)
+		return nil, fmt.Errorf("chat_id=%d load conversation: %w", msg.Chat.ID, err)
 	}
 	selectedHistory := selectDecisionHistory(history, messages)
 	important, err := w.Repo.ImportantContext(ctx, msg.Chat.ID, msg.MessageThreadID)
 	if err != nil {
-		return fmt.Errorf("chat_id=%d load important context: %w", msg.Chat.ID, err)
+		return nil, fmt.Errorf("chat_id=%d load important context: %w", msg.Chat.ID, err)
 	}
 	request := model.DecisionRequest{
 		BotUsername:      w.Username,
@@ -268,7 +290,7 @@ func (w *Worker) ProcessBatch(ctx context.Context, items []model.Update) error {
 	started := time.Now()
 	decision, err := w.AI.Ask(ctx, request)
 	if err != nil {
-		return fmt.Errorf("chat_id=%d AI decision failed after %s: %w", msg.Chat.ID, time.Since(started), err)
+		return nil, fmt.Errorf("chat_id=%d AI decision failed after %s: %w", msg.Chat.ID, time.Since(started), err)
 	}
 	updates := append([]model.ImportantUpdate(nil), decision.ImportantUpdates...)
 	if summary := strings.TrimSpace(decision.Important); summary != "" {
@@ -286,7 +308,7 @@ func (w *Worker) ProcessBatch(ctx context.Context, items []model.Update) error {
 		for _, id := range decision.ForgetImportantIDs {
 			if !validIDs[id] {
 				log.Printf("AI selected invalid important context ID chat_id=%d thread_id=%d source_message_id=%d", msg.Chat.ID, msg.MessageThreadID, id)
-				return nil
+				return updateIDs, nil
 			}
 		}
 		newIDs := make(map[int64]bool, len(messages))
@@ -297,59 +319,102 @@ func (w *Worker) ProcessBatch(ctx context.Context, items []model.Update) error {
 		for _, update := range updates {
 			if !newIDs[update.SourceMessageID] || seen[update.SourceMessageID] {
 				log.Printf("AI selected invalid important update chat_id=%d source_message_id=%d", msg.Chat.ID, update.SourceMessageID)
-				return nil
+				return updateIDs, nil
 			}
 			seen[update.SourceMessageID] = true
 		}
 		if err := w.Repo.ApplyImportantBatch(ctx, messages, updates, decision.ForgetImportantIDs, now); err != nil {
-			return fmt.Errorf("chat_id=%d update important context: %w", msg.Chat.ID, err)
+			return nil, fmt.Errorf("chat_id=%d update important context: %w", msg.Chat.ID, err)
 		}
 		log.Printf("important context updated chat_id=%d thread_id=%d forgotten=%d stored=%d", msg.Chat.ID, msg.MessageThreadID, len(decision.ForgetImportantIDs), len(updates))
 	}
-	action := decision.Action
-	if action == "" { // Older callers can still construct a decision without an explicit action.
-		switch {
-		case decision.Poll != nil:
-			action = "poll"
-		case decision.Reply != "":
-			action = "reply"
-		default:
-			action = "silence"
+	actions := decision.Actions
+	if len(actions) == 0 && decisionAction(decision) != "silence" {
+		actions = []model.Decision{decision}
+	}
+	validActions := make([]model.Decision, 0, len(actions))
+	for _, action := range actions {
+		action.Action = decisionAction(action)
+		if validActionTarget(action, selectedHistory, messages) {
+			validActions = append(validActions, action)
+		} else {
+			log.Printf("AI selected invalid action target update_id=%d chat_id=%d action=%s reply_to_message_id=%d", item.UpdateID, msg.Chat.ID, action.Action, action.ReplyToMessageID)
 		}
 	}
-	if action == "silence" {
-		log.Printf("AI chose silence update_id=%d chat_id=%d duration=%s", item.UpdateID, msg.Chat.ID, time.Since(started))
-		return nil
+	plan := model.ActionPlan{UpdateIDs: updateIDs, Actions: validActions}
+	if w.ActionPlans != nil {
+		plan, err = w.ActionPlans.SaveActionPlan(ctx, msg.Chat.ID, msg.MessageThreadID, firstUpdateID, plan)
+		if err != nil {
+			return nil, fmt.Errorf("save action plan: %w", err)
+		}
 	}
-	if decision.ReplyToMessageID > 0 {
-		validTarget := false
-		for _, entry := range selectedHistory {
-			if !entry.Bot && entry.MessageID == decision.ReplyToMessageID {
-				validTarget = true
-				break
+	log.Printf("AI chose actions chat_id=%d thread_id=%d count=%d duration=%s", msg.Chat.ID, msg.MessageThreadID, len(plan.Actions), time.Since(started))
+	if err := w.executePlan(ctx, msg, firstUpdateID, plan); err != nil {
+		return nil, err
+	}
+	return plan.UpdateIDs, nil
+}
+
+func decisionAction(decision model.Decision) string {
+	if decision.Action != "" {
+		return decision.Action
+	}
+	if decision.Poll != nil {
+		return "poll"
+	}
+	if decision.Reply != "" {
+		return "reply"
+	}
+	return "silence"
+}
+
+func validActionTarget(action model.Decision, history []model.HistoryEntry, messages []model.Message) bool {
+	id := action.ReplyToMessageID
+	if id < 0 {
+		return false
+	}
+	if id == 0 {
+		return action.Action == "message" || action.Action == "poll" || action.Action == "image"
+	}
+	found := false
+	for _, entry := range history {
+		if !entry.Bot && entry.MessageID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return false
+	}
+	if action.Action == "voice" || action.Action == "music" {
+		for _, message := range messages {
+			if message.MessageID == id {
+				return true
 			}
 		}
-		if !validTarget {
-			log.Printf("AI selected invalid reply target update_id=%d chat_id=%d reply_to_message_id=%d", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID)
-			return nil
-		}
-	} else if action == "reply" || action == "reaction" || action == "music" || action == "voice" || decision.ReplyToMessageID < 0 {
-		log.Printf("AI selected invalid reply target update_id=%d chat_id=%d reply_to_message_id=%d", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID)
-		return nil
+		return false
 	}
-	if action == "voice" {
-		requestedNow := false
-		for _, current := range messages {
-			if current.MessageID == decision.ReplyToMessageID {
-				requestedNow = true
-				break
+	return true
+}
+
+func (w *Worker) executePlan(ctx context.Context, msg model.Message, firstUpdateID int64, plan model.ActionPlan) error {
+	for index := plan.Completed; index < len(plan.Actions); index++ {
+		if err := w.executeAction(ctx, msg, firstUpdateID, plan.Actions[index]); err != nil {
+			return fmt.Errorf("action %d of %d: %w", index+1, len(plan.Actions), err)
+		}
+		if w.ActionPlans != nil {
+			if err := w.ActionPlans.MarkActionCompleted(ctx, msg.Chat.ID, msg.MessageThreadID, firstUpdateID, index); err != nil {
+				return fmt.Errorf("mark action %d completed: %w", index, err)
 			}
 		}
-		if !requestedNow {
-			log.Printf("AI selected old voice request update_id=%d chat_id=%d reply_to_message_id=%d", item.UpdateID, msg.Chat.ID, decision.ReplyToMessageID)
-			return nil
-		}
 	}
+	return nil
+}
+
+func (w *Worker) executeAction(ctx context.Context, msg model.Message, updateID int64, decision model.Decision) error {
+	item := model.Update{UpdateID: updateID}
+	started := time.Now()
+	action := decisionAction(decision)
 	target := msg
 	target.MessageID = decision.ReplyToMessageID
 	var storedText string

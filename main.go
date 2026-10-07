@@ -125,7 +125,7 @@ func main() {
 
 	log.Printf("AI model decision_and_vision=%s", botModel)
 	aiClient := ai.New(cfg.aiKey, botModel, botModel)
-	worker := &controller.Worker{Repo: repo, AI: aiClient, Telegram: tg, Images: images.New(), Photos: tg, Vision: aiClient, Music: music, Voice: tts.New(cfg.aiKey), BotID: me.ID, Username: me.Username}
+	worker := &controller.Worker{Repo: repo, ActionPlans: repo, AI: aiClient, Telegram: tg, Images: images.New(), Photos: tg, Vision: aiClient, Music: music, Voice: tts.New(cfg.aiKey), BotID: me.ID, Username: me.Username}
 	var workers sync.WaitGroup
 	workers.Add(1)
 	go func() {

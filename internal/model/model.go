@@ -155,6 +155,8 @@ type Repository interface {
 	EnqueueUpdate(context.Context, Update, []byte) error
 	PendingUpdates(context.Context, int64, int) ([]Update, error)
 	MarkUpdatesProcessed(context.Context, []int64) error
+	UnconsideredUpdates(context.Context, int64, int64, int64, time.Time, int) ([]Update, error)
+	MarkUpdatesConsidered(context.Context, []int64) error
 	TryDecisionLock(context.Context) (func() error, bool, error)
 	Prune(context.Context, time.Time) error
 	AddIncoming(context.Context, Message, time.Time) error

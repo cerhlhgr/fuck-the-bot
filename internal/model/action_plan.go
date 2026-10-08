@@ -3,9 +3,10 @@ package model
 import "context"
 
 type ActionPlan struct {
-	UpdateIDs []int64
-	Actions   []Decision
-	Completed int
+	UpdateIDs           []int64
+	ConsideredUpdateIDs []int64
+	Actions             []Decision
+	Completed           int
 }
 
 type ActionPlanStore interface {

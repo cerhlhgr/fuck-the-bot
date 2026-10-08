@@ -20,9 +20,9 @@ func (s *Store) LoadActionPlan(ctx context.Context, chatID, threadID, firstUpdat
 	var plan model.ActionPlan
 	var actionsJSON []byte
 	err := s.pool.QueryRow(queryCtx, `
-		SELECT update_ids, actions, completed FROM bot_action_plans
+		SELECT update_ids, considered_update_ids, actions, completed FROM bot_action_plans
 		WHERE chat_id = $1 AND thread_id = $2 AND first_update_id = $3`,
-		chatID, threadID, firstUpdateID).Scan(&plan.UpdateIDs, &actionsJSON, &plan.Completed)
+		chatID, threadID, firstUpdateID).Scan(&plan.UpdateIDs, &plan.ConsideredUpdateIDs, &actionsJSON, &plan.Completed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.ActionPlan{}, false, nil
 	}
@@ -52,10 +52,10 @@ func (s *Store) SaveActionPlan(ctx context.Context, chatID, threadID, firstUpdat
 	queryCtx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	_, err = s.pool.Exec(queryCtx, `
-		INSERT INTO bot_action_plans (chat_id, thread_id, first_update_id, update_ids, actions)
-		VALUES ($1, $2, $3, $4, $5::jsonb)
+		INSERT INTO bot_action_plans (chat_id, thread_id, first_update_id, update_ids, considered_update_ids, actions)
+		VALUES ($1, $2, $3, $4, $5, $6::jsonb)
 		ON CONFLICT (chat_id, thread_id, first_update_id) DO NOTHING`,
-		chatID, threadID, firstUpdateID, plan.UpdateIDs, string(actionsJSON))
+		chatID, threadID, firstUpdateID, plan.UpdateIDs, plan.ConsideredUpdateIDs, string(actionsJSON))
 	if err != nil {
 		return model.ActionPlan{}, err
 	}

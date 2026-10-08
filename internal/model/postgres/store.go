@@ -74,8 +74,15 @@ func (s *Store) tryLock(ctx context.Context, key int64) (func() error, bool, err
 }
 
 func (s *Store) EnqueueUpdate(ctx context.Context, item model.Update, body []byte) error {
+	var chatID, messageID, threadID int64
+	var sentAt time.Time
 	if item.Message != nil {
 		item.Message.NormalizeThread()
+		chatID, messageID, threadID = item.Message.Chat.ID, item.Message.MessageID, item.Message.MessageThreadID
+		sentAt = time.Unix(item.Message.Date, 0)
+		if item.Message.Date == 0 || sentAt.After(time.Now()) {
+			sentAt = time.Now()
+		}
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
@@ -85,8 +92,9 @@ func (s *Store) EnqueueUpdate(ctx context.Context, item model.Update, body []byt
 	}
 	defer tx.Rollback(queryCtx)
 	tag, err := tx.Exec(queryCtx, `
-		INSERT INTO bot_updates (update_id, payload) VALUES ($1, $2::jsonb)
-		ON CONFLICT (update_id) DO NOTHING`, item.UpdateID, string(body))
+		INSERT INTO bot_updates (update_id, payload, chat_id, thread_id, message_id, sent_at)
+		VALUES ($1, $2::jsonb, NULLIF($3::bigint, 0), $4, NULLIF($5::bigint, 0), NULLIF($6::timestamptz, 'epoch'::timestamptz))
+		ON CONFLICT (update_id) DO NOTHING`, item.UpdateID, string(body), chatID, threadID, messageID, sentAt)
 	if err != nil {
 		return err
 	}
@@ -96,6 +104,52 @@ func (s *Store) EnqueueUpdate(ctx context.Context, item model.Update, body []byt
 		}
 	}
 	return tx.Commit(queryCtx)
+}
+
+func (s *Store) UnconsideredUpdates(ctx context.Context, chatID, threadID, beforeMessageID int64, now time.Time, limit int) ([]model.Update, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	rows, err := s.pool.Query(queryCtx, `
+		SELECT update_id, payload::text FROM bot_updates
+		WHERE chat_id = $1 AND thread_id = $2 AND message_id <= $3
+		  AND sent_at >= $4 AND sent_at <= $5 AND considered_at IS NULL
+		  AND COALESCE(payload->'message'->'from'->>'is_bot', 'false') <> 'true'
+		ORDER BY message_id, update_id LIMIT $6`, chatID, threadID, beforeMessageID, now.Add(-model.ContextLifetime), now, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var updates []model.Update
+	for rows.Next() {
+		var update model.Update
+		var id int64
+		var raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(raw), &update); err != nil {
+			return nil, fmt.Errorf("decode decision candidate %d: %w", id, err)
+		}
+		if update.UpdateID != id || update.Message == nil {
+			return nil, fmt.Errorf("invalid decision candidate %d", id)
+		}
+		update.Message.NormalizeThread()
+		updates = append(updates, update)
+	}
+	return updates, rows.Err()
+}
+
+func (s *Store) MarkUpdatesConsidered(ctx context.Context, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	_, err := s.pool.Exec(queryCtx, `UPDATE bot_updates SET considered_at = COALESCE(considered_at, now()) WHERE update_id = ANY($1)`, ids)
+	return err
 }
 
 func (s *Store) PendingUpdates(ctx context.Context, afterID int64, limit int) ([]model.Update, error) {

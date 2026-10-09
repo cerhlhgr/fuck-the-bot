@@ -418,7 +418,7 @@ func TestWorkerAsksToClarifyAmbiguousContact(t *testing.T) {
 	}
 }
 
-func TestScheduledRunReviewsAllNewChatMessages(t *testing.T) {
+func TestScheduledRunWaitsForMentionOrReply(t *testing.T) {
 	repo := &fakeRepo{}
 	first := model.Message{MessageID: 10, Text: "Встречаемся в пятницу"}
 	mentioned := model.Message{MessageID: 11, Text: "Во сколько?"}
@@ -436,15 +436,15 @@ func TestScheduledRunReviewsAllNewChatMessages(t *testing.T) {
 	if err := worker.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if ai.calls != 1 || len(ai.request.NewMessageIDs) != 4 || ai.request.NewMessageIDs[0] != 10 || ai.request.NewMessageIDs[1] != 11 || ai.request.NewMessageIDs[2] != 12 || ai.request.NewMessageIDs[3] != 13 || len(ai.request.TriggerMessageIDs) != 2 || ai.request.TriggerMessageIDs[0] != 11 || ai.request.TriggerMessageIDs[1] != 12 || len(ai.request.NewReplyToBotIDs) != 1 || ai.request.NewReplyToBotIDs[0] != 12 || len(repo.incoming) != 4 || len(repo.queued) != 0 {
+	if ai.calls != 1 || len(ai.request.NewMessageIDs) != 3 || ai.request.NewMessageIDs[0] != 10 || ai.request.NewMessageIDs[1] != 11 || ai.request.NewMessageIDs[2] != 12 || len(ai.request.TriggerMessageIDs) != 2 || ai.request.TriggerMessageIDs[0] != 11 || ai.request.TriggerMessageIDs[1] != 12 || len(ai.request.NewReplyToBotIDs) != 1 || ai.request.NewReplyToBotIDs[0] != 12 || len(repo.incoming) != 4 || len(repo.queued) != 0 || repo.consideredUpdates[4] {
 		t.Fatalf("candidate selection failed: calls=%d new=%v triggers=%v stored=%d pending=%d", ai.calls, ai.request.NewMessageIDs, ai.request.TriggerMessageIDs, len(repo.incoming), len(repo.queued))
 	}
-	if len(ai.request.History) != 4 || ai.request.History[0].MessageID != 10 || ai.request.History[1].MessageID != 11 || ai.request.History[2].MessageID != 12 || ai.request.History[3].MessageID != 13 {
+	if len(ai.request.History) != 3 || ai.request.History[0].MessageID != 10 || ai.request.History[1].MessageID != 11 || ai.request.History[2].MessageID != 12 {
 		t.Fatalf("unexpected history around mention: %+v", ai.request.History)
 	}
 }
 
-func TestUnmentionedPhotoCanBeAnalyzedForAutonomousDecision(t *testing.T) {
+func TestUnmentionedPhotoWaitsForTriggerBeforeAnalysis(t *testing.T) {
 	repo := &fakeRepo{}
 	ai := &fakeAI{}
 	vision := &fakePhotoAnalyzer{description: "кот"}
@@ -457,8 +457,20 @@ func TestUnmentionedPhotoCanBeAnalyzedForAutonomousDecision(t *testing.T) {
 	if err := worker.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if ai.calls != 1 || vision.calls != 1 || len(repo.incoming) != 1 || len(repo.queued) != 0 || len(ai.request.History) != 1 || !strings.Contains(ai.request.History[0].Text, "На фото: кот") {
-		t.Fatalf("unmentioned photo was not analyzed: decision=%d vision=%d stored=%d pending=%d history=%+v", ai.calls, vision.calls, len(repo.incoming), len(repo.queued), ai.request.History)
+	if ai.calls != 0 || vision.calls != 0 || len(repo.incoming) != 1 || len(repo.queued) != 0 {
+		t.Fatalf("unmentioned photo triggered AI: decision=%d vision=%d stored=%d pending=%d", ai.calls, vision.calls, len(repo.incoming), len(repo.queued))
+	}
+	mention := model.Message{MessageID: 21, Text: "Что на фото?"}
+	mentionTestMessage(&mention, "MyBot")
+	mention.Chat.ID = -42
+	if err := repo.EnqueueUpdate(context.Background(), model.Update{UpdateID: 2, Message: &mention}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if ai.calls != 1 || vision.calls != 1 || len(ai.request.History) != 2 || !strings.Contains(ai.request.History[0].Text, "На фото: кот") {
+		t.Fatalf("photo missing when mentioned later: decision=%d vision=%d history=%+v", ai.calls, vision.calls, ai.request.History)
 	}
 }
 
@@ -657,7 +669,7 @@ func TestReplyToBotInOrdinarySupergroupKeepsDialogueAndCorrectsTarget(t *testing
 	}
 }
 
-func TestWorkerConsidersReplyToAnotherUserWithoutTreatingItAsDirectMention(t *testing.T) {
+func TestWorkerDoesNotTriggerOnReplyToAnotherUser(t *testing.T) {
 	repo := &fakeRepo{}
 	ai := &fakeAI{}
 	worker := Worker{Repo: repo, AI: ai, Telegram: &fakeTelegram{}, BotID: 99, Username: "MyBot"}
@@ -666,8 +678,8 @@ func TestWorkerConsidersReplyToAnotherUserWithoutTreatingItAsDirectMention(t *te
 	if err := worker.Process(context.Background(), model.Update{UpdateID: 14, Message: &msg}); err != nil {
 		t.Fatal(err)
 	}
-	if ai.calls != 1 || len(ai.request.TriggerMessageIDs) != 0 || len(repo.incoming) != 1 {
-		t.Fatalf("reply to another user was mishandled: calls=%d direct=%v stored=%d", ai.calls, ai.request.TriggerMessageIDs, len(repo.incoming))
+	if ai.calls != 0 || len(repo.incoming) != 1 {
+		t.Fatalf("reply to another user triggered AI: calls=%d stored=%d", ai.calls, len(repo.incoming))
 	}
 }
 

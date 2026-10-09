@@ -509,7 +509,7 @@ func TestBatchStoresImportantFactsFromDifferentMessages(t *testing.T) {
 	}
 }
 
-func TestWorkerLetsAIChooseEarlierMessage(t *testing.T) {
+func TestWorkerDoesNotAnswerEarlierContextMessage(t *testing.T) {
 	repo := &fakeRepo{history: []model.HistoryEntry{{MessageID: 5, Text: "старый вопрос", Author: "@ivan"}}}
 	ai := &fakeAI{decision: model.Decision{Reply: "Ну привет!", ReplyToMessageID: 5}}
 	tg := &fakeTelegram{}
@@ -520,7 +520,7 @@ func TestWorkerLetsAIChooseEarlierMessage(t *testing.T) {
 	if err := worker.Process(context.Background(), model.Update{UpdateID: 12, Message: &msg}); err != nil {
 		t.Fatal(err)
 	}
-	if ai.calls != 1 || ai.request.CurrentMessageID != 7 || len(ai.request.History) != 2 || ai.request.History[1].Text != msg.Text || len(tg.messages) != 1 || tg.messages[0].MessageID != 5 || tg.messages[0].Chat.ID != -42 || len(repo.replyTargets) != 1 || repo.replyTargets[0] != 5 {
+	if ai.calls != 1 || ai.request.CurrentMessageID != 7 || len(ai.request.History) != 2 || ai.request.History[1].Text != msg.Text || len(tg.messages) != 0 || len(repo.replyTargets) != 0 {
 		t.Fatalf("unexpected decision handling: ai=%+v sent=%+v targets=%+v", ai, tg.messages, repo.replyTargets)
 	}
 }
@@ -819,6 +819,25 @@ func TestWorkerHonorsSilenceAndRejectsUnknownTarget(t *testing.T) {
 	}
 	if len(tg.polls) != 0 {
 		t.Fatal("AI-selected poll with unknown target was sent to Telegram")
+	}
+}
+
+func TestWorkerPassesCompleteHourAndRejectsActionOnContextMessage(t *testing.T) {
+	repo := &fakeRepo{}
+	for id := int64(1); id <= 70; id++ {
+		repo.history = append(repo.history, model.HistoryEntry{MessageID: id, Text: strings.Repeat("длинная реплика ", 100)})
+	}
+	msg := model.Message{MessageID: 71, Text: "Что решили?"}
+	mentionTestMessage(&msg, "MyBot")
+	msg.Chat.ID = -42
+	ai := &fakeAI{decision: model.Decision{Action: "reply", Reply: "Запоздалый ответ", ReplyToMessageID: 1}}
+	tg := &fakeTelegram{}
+	worker := Worker{Repo: repo, AI: ai, Telegram: tg, Username: "MyBot"}
+	if err := worker.Process(context.Background(), model.Update{UpdateID: 71, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(ai.request.History) != 71 || ai.request.History[0].Text != repo.history[0].Text || ai.request.History[69].Text != repo.history[69].Text || len(tg.messages) != 0 {
+		t.Fatalf("full context or action target guard failed: history=%d answers=%d", len(ai.request.History), len(tg.messages))
 	}
 }
 

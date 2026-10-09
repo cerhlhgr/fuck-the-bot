@@ -23,7 +23,7 @@ import (
 	"fuck-the-bot/internal/model/postgres"
 )
 
-const botModel = "openai/gpt-5.4-nano"
+const botModel = "openai/gpt-5.6-luna"
 
 type config struct {
 	telegramToken    string

@@ -456,7 +456,7 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 				break
 			}
 		}
-		if validActionTarget(action, selectedHistory, messages) {
+		if validActionTarget(action, messages) {
 			validActions = append(validActions, action)
 		} else {
 			log.Printf("AI selected invalid action target update_id=%d chat_id=%d action=%s reply_to_message_id=%d", trigger.UpdateID, msg.Chat.ID, action.Action, action.ReplyToMessageID)
@@ -492,7 +492,7 @@ func decisionAction(decision model.Decision) string {
 	return "silence"
 }
 
-func validActionTarget(action model.Decision, history []model.HistoryEntry, messages []model.Message) bool {
+func validActionTarget(action model.Decision, messages []model.Message) bool {
 	id := action.ReplyToMessageID
 	if id < 0 {
 		return false
@@ -500,25 +500,12 @@ func validActionTarget(action model.Decision, history []model.HistoryEntry, mess
 	if id == 0 {
 		return action.Action == "message" || action.Action == "poll" || action.Action == "image"
 	}
-	found := false
-	for _, entry := range history {
-		if !entry.Bot && entry.MessageID == id {
-			found = true
-			break
+	for _, message := range messages {
+		if message.MessageID == id {
+			return true
 		}
 	}
-	if !found {
-		return false
-	}
-	if action.Action == "voice" || action.Action == "music" || action.Action == "mention" || action.Action == "search" {
-		for _, message := range messages {
-			if message.MessageID == id {
-				return true
-			}
-		}
-		return false
-	}
-	return true
+	return false
 }
 
 func (w *Worker) executePlan(ctx context.Context, msg model.Message, firstUpdateID int64, plan model.ActionPlan) error {

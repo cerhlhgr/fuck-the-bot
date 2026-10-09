@@ -98,6 +98,25 @@ func TestSystemPromptDescribesWebSearchAvailability(t *testing.T) {
 	}
 }
 
+func TestSystemPromptUsesJokerStyleAndTracksReferences(t *testing.T) {
+	prompt := SystemPrompt(model.DecisionRequest{BotUsername: "mybot"})
+	if !strings.Contains(prompt, "дружелюбный шутник") || !strings.Contains(prompt, "Сарказм и мат допустимы изредка") || !strings.Contains(prompt, "найди в переписке, к чему они относятся") || strings.Contains(prompt, "В большинстве текстовых ответов") {
+		t.Fatal("joker style or conversation tracking missing from prompt")
+	}
+	for _, rule := range []string{
+		"полную сохранённую переписку этого чата и темы за последний час",
+		"само упоминание не обязывает отвечать",
+		"НЕ делает все последующие реплики обращениями к тебе",
+		"Вопрос, просьба или шутка в общем чате сами по себе не означают обращения к тебе",
+		"При сомнении молчи",
+		"Старые сообщения вне new_message_ids используй только как контекст",
+	} {
+		if !strings.Contains(prompt, rule) {
+			t.Fatalf("missing reply-selection rule %q", rule)
+		}
+	}
+}
+
 func TestMentionActionUsesContactLookup(t *testing.T) {
 	prompt := SystemPrompt(model.DecisionRequest{BotUsername: "mybot", Contacts: []model.Contact{{Name: "Игорь", Username: "igor"}, {Name: "Алексей"}}})
 	if !strings.Contains(prompt, `"action":"mention"`) || !strings.Contains(prompt, "contact_query") {

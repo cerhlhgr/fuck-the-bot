@@ -75,14 +75,15 @@ func (s *Store) tryLock(ctx context.Context, key int64) (func() error, bool, err
 
 func (s *Store) EnqueueUpdate(ctx context.Context, item model.Update, body []byte) error {
 	var chatID, messageID, threadID int64
-	var sentAt time.Time
+	var sentAt *time.Time
 	if item.Message != nil {
 		item.Message.NormalizeThread()
 		chatID, messageID, threadID = item.Message.Chat.ID, item.Message.MessageID, item.Message.MessageThreadID
-		sentAt = time.Unix(item.Message.Date, 0)
-		if item.Message.Date == 0 || sentAt.After(time.Now()) {
-			sentAt = time.Now()
+		date := time.Unix(item.Message.Date, 0)
+		if item.Message.Date == 0 || date.After(time.Now()) {
+			date = time.Now()
 		}
+		sentAt = &date
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
@@ -93,7 +94,7 @@ func (s *Store) EnqueueUpdate(ctx context.Context, item model.Update, body []byt
 	defer tx.Rollback(queryCtx)
 	tag, err := tx.Exec(queryCtx, `
 		INSERT INTO bot_updates (update_id, payload, chat_id, thread_id, message_id, sent_at)
-		VALUES ($1, $2::jsonb, NULLIF($3::bigint, 0), $4, NULLIF($5::bigint, 0), NULLIF($6::timestamptz, 'epoch'::timestamptz))
+		VALUES ($1, $2::jsonb, NULLIF($3::bigint, 0), $4, NULLIF($5::bigint, 0), $6)
 		ON CONFLICT (update_id) DO NOTHING`, item.UpdateID, string(body), chatID, threadID, messageID, sentAt)
 	if err != nil {
 		return err

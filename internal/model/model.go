@@ -141,6 +141,7 @@ type DecisionRequest struct {
 	CurrentReplyToMessageID int64
 	CurrentRepliedToBot     bool
 	NewMessageIDs           []int64
+	TriggerMessageIDs       []int64
 	NewReplyToBotIDs        []int64
 	RepliedToBotMessages    []RepliedToBotMessage
 	History                 []HistoryEntry

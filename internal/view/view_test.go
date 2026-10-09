@@ -67,7 +67,7 @@ func TestSystemPromptIncludesPermanentContext(t *testing.T) {
 	}
 	prompt := SystemPrompt(request)
 	memory := ImportantContext(request.Important)
-	if !strings.Contains(prompt, `"important_updates"`) || !strings.Contains(prompt, `"forget_important_ids"`) || !strings.Contains(prompt, `message_id=[8,9]`) || !strings.Contains(memory, `"source_message_id"`) || !strings.Contains(memory, `"kind"`) || !strings.Contains(memory, `2026-10-06T20:00:00Z`) || !strings.Contains(memory, `2026-10-07T08:00:00Z`) || strings.Contains(memory, `source_text`) || strings.Index(memory, request.Important[0].Summary) >= strings.Index(memory, request.Important[1].Summary) || !strings.Contains(prompt, "сравни полные дату и время") {
+	if !strings.Contains(prompt, `"important_updates"`) || !strings.Contains(prompt, `"forget_important_ids"`) || !strings.Contains(prompt, `new_message_ids=[8,9]`) || !strings.Contains(memory, `"source_message_id"`) || !strings.Contains(memory, `"kind"`) || !strings.Contains(memory, `2026-10-06T20:00:00Z`) || !strings.Contains(memory, `2026-10-07T08:00:00Z`) || strings.Contains(memory, `source_text`) || strings.Index(memory, request.Important[0].Summary) >= strings.Index(memory, request.Important[1].Summary) || !strings.Contains(prompt, "сравни полные дату и время") {
 		t.Fatalf("prompt is missing permanent context or output schema: %s", prompt)
 	}
 	other := request

@@ -37,7 +37,7 @@ func TestPostgresActionPlanPersistsProgress(t *testing.T) {
 		t.Fatalf("unexpected existing plan: %+v, %t, %v", loaded, found, err)
 	}
 	saved, err := store.SaveActionPlan(ctx, chatID, 7, firstUpdateID, plan)
-	if err != nil || len(saved.Actions) != 2 || saved.Actions[1].Poll == nil || len(saved.UpdateIDs) != 2 {
+	if err != nil || len(saved.Actions) != 2 || saved.Actions[1].Poll == nil || len(saved.UpdateIDs) != 2 || saved.ConsideredUpdateIDs == nil {
 		t.Fatalf("save plan: %+v, %v", saved, err)
 	}
 	other := model.ActionPlan{UpdateIDs: []int64{999}, Actions: []model.Decision{{Action: "message", Reply: "Дубликат"}}}

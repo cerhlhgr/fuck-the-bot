@@ -88,7 +88,7 @@ func TestScheduledBatchResumesRemainingActionsWithoutNewAICall(t *testing.T) {
 	if err := worker.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if ai.calls != 1 || len(telegram.answers) != 1 || telegram.answers[0] != "Первому" || len(repo.queued) != 2 || plans.plans[1].Completed != 1 || len(repo.important) != 1 {
+	if ai.calls != 1 || len(telegram.answers) != 1 || telegram.answers[0] != "Первому" || len(repo.queued) != 2 || plans.plans[1].Completed != 1 || len(repo.important) != 1 || repo.consideredUpdates[1] || repo.consideredUpdates[2] {
 		t.Fatalf("first attempt: AI=%d sent=%+v queued=%d plan=%+v memory=%+v", ai.calls, telegram.answers, len(repo.queued), plans.plans[1], repo.important)
 	}
 	third := model.Message{MessageID: 12, Text: "Новое сообщение"}
@@ -101,7 +101,7 @@ func TestScheduledBatchResumesRemainingActionsWithoutNewAICall(t *testing.T) {
 	if err := worker.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if ai.calls != 1 || len(telegram.answers) != 2 || telegram.answers[1] != "Второму" || len(repo.queued) != 1 || repo.queued[0].UpdateID != 3 || plans.plans[1].Completed != 2 {
+	if ai.calls != 1 || len(telegram.answers) != 2 || telegram.answers[1] != "Второму" || len(repo.queued) != 1 || repo.queued[0].UpdateID != 3 || plans.plans[1].Completed != 2 || !repo.consideredUpdates[1] || !repo.consideredUpdates[2] {
 		t.Fatalf("resume repeated or lost actions: AI=%d sent=%+v queued=%+v plan=%+v", ai.calls, telegram.answers, repo.queued, plans.plans[1])
 	}
 	ai.decision = model.Decision{Action: "silence"}

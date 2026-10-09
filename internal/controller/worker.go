@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -100,7 +101,36 @@ func (w *Worker) rememberPhoto(hash [32]byte, description string, now time.Time)
 	w.photoCache[hash] = photoCacheEntry{description: description, createdAt: now}
 }
 
+func (w *Worker) describeCandidatePhoto(ctx context.Context, msg model.Message, updateID int64, now time.Time) model.Message {
+	log.Printf("photo analysis started update_id=%d chat_id=%d message_id=%d", updateID, msg.Chat.ID, msg.MessageID)
+	if w.Photos == nil || w.Vision == nil {
+		log.Printf("photo analysis unavailable update_id=%d reason=not_configured", updateID)
+		return msg
+	}
+	photo, err := w.Photos.DownloadPhoto(ctx, msg.Photo)
+	if err != nil {
+		log.Printf("photo download failed update_id=%d chat_id=%d message_id=%d error=%v", updateID, msg.Chat.ID, msg.MessageID, err)
+		return msg
+	}
+	hash := sha256.Sum256(photo)
+	if description, ok := w.cachedPhoto(hash, now); ok {
+		msg.PhotoDescription = description
+		log.Printf("photo analysis cache hit update_id=%d chat_id=%d message_id=%d", updateID, msg.Chat.ID, msg.MessageID)
+		return msg
+	}
+	description, err := w.Vision.DescribePhoto(ctx, photo)
+	if err != nil {
+		log.Printf("photo analysis failed update_id=%d chat_id=%d message_id=%d error=%v", updateID, msg.Chat.ID, msg.MessageID, err)
+		return msg
+	}
+	msg.PhotoDescription = description
+	w.rememberPhoto(hash, description, now)
+	log.Printf("photo analysis completed update_id=%d chat_id=%d message_id=%d", updateID, msg.Chat.ID, msg.MessageID)
+	return msg
+}
+
 const batchPageSize = 500
+const maxDecisionCandidates = 32
 
 func (w *Worker) repliedToBot(msg model.Message) bool {
 	return w.BotID != 0 && msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil && msg.ReplyToMessage.From.ID == w.BotID
@@ -221,12 +251,15 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 			if err := w.executePlan(ctx, *first, firstUpdateID, plan); err != nil {
 				return nil, err
 			}
+			if err := w.Repo.MarkUpdatesConsidered(ctx, plan.ConsideredUpdateIDs); err != nil {
+				return nil, fmt.Errorf("mark decision candidates considered: %w", err)
+			}
 			return plan.UpdateIDs, nil
 		}
 	}
 	now := time.Now()
-	var messages []model.Message
-	var item model.Update
+	var batchCandidates []model.Update
+	var trigger model.Update
 	for _, pending := range items {
 		if pending.Message == nil {
 			log.Printf("update skipped update_id=%d reason=no_message", pending.UpdateID)
@@ -240,26 +273,6 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 		log.Printf("message loaded update_id=%d chat_id=%d thread_id=%d message_id=%d", pending.UpdateID, msg.Chat.ID, msg.MessageThreadID, msg.MessageID)
 		_, mentioned := model.MentionedText(msg, w.Username)
 		repliedToBot := w.repliedToBot(msg)
-		if (mentioned || repliedToBot) && len(msg.Photo) > 0 && (msg.From == nil || !msg.From.IsBot) && (msg.Date == 0 || !time.Unix(msg.Date, 0).Before(now.Add(-model.ContextLifetime))) {
-			log.Printf("photo analysis started update_id=%d chat_id=%d message_id=%d", pending.UpdateID, msg.Chat.ID, msg.MessageID)
-			if w.Photos == nil || w.Vision == nil {
-				log.Printf("photo analysis unavailable update_id=%d reason=not_configured", pending.UpdateID)
-			} else if photo, err := w.Photos.DownloadPhoto(ctx, msg.Photo); err != nil {
-				log.Printf("photo download failed update_id=%d chat_id=%d message_id=%d error=%v", pending.UpdateID, msg.Chat.ID, msg.MessageID, err)
-			} else {
-				hash := sha256.Sum256(photo)
-				if description, ok := w.cachedPhoto(hash, now); ok {
-					msg.PhotoDescription = description
-					log.Printf("photo analysis cache hit update_id=%d chat_id=%d message_id=%d", pending.UpdateID, msg.Chat.ID, msg.MessageID)
-				} else if description, err := w.Vision.DescribePhoto(ctx, photo); err != nil {
-					log.Printf("photo analysis failed update_id=%d chat_id=%d message_id=%d error=%v", pending.UpdateID, msg.Chat.ID, msg.MessageID, err)
-				} else {
-					msg.PhotoDescription = description
-					w.rememberPhoto(hash, description, now)
-					log.Printf("photo analysis completed update_id=%d chat_id=%d message_id=%d", pending.UpdateID, msg.Chat.ID, msg.MessageID)
-				}
-			}
-		}
 		if err := w.Repo.AddIncoming(ctx, msg, now); err != nil {
 			return nil, fmt.Errorf("chat_id=%d message_id=%d save incoming message: %w", msg.Chat.ID, msg.MessageID, err)
 		}
@@ -271,20 +284,75 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 			log.Printf("AI decision skipped update_id=%d reason=message_older_than_one_hour", pending.UpdateID)
 			continue
 		}
-		if !mentioned && !repliedToBot {
-			log.Printf("AI decision skipped update_id=%d reason=no_bot_mention_or_reply", pending.UpdateID)
-			continue
-		}
-		if len(messages) > 0 && (messages[0].Chat.ID != msg.Chat.ID || messages[0].MessageThreadID != msg.MessageThreadID) {
+		if len(batchCandidates) > 0 && (batchCandidates[0].Message.Chat.ID != msg.Chat.ID || batchCandidates[0].Message.MessageThreadID != msg.MessageThreadID) {
 			return nil, errors.New("dialogue batch spans multiple chats or topics")
 		}
-		messages = append(messages, msg)
-		item = pending
+		pending.Message = &msg
+		batchCandidates = append(batchCandidates, pending)
+		if mentioned || repliedToBot {
+			trigger = pending
+		} else {
+			log.Printf("AI decision deferred update_id=%d reason=waiting_for_bot_mention_or_reply", pending.UpdateID)
+		}
 	}
-	if len(messages) == 0 {
+	if trigger.Message == nil {
 		return updateIDs, nil
 	}
-	msg := messages[len(messages)-1]
+	msg := *trigger.Message
+	candidates, err := w.Repo.UnconsideredUpdates(ctx, msg.Chat.ID, msg.MessageThreadID, msg.MessageID, now, maxDecisionCandidates-1)
+	if err != nil {
+		return nil, fmt.Errorf("chat_id=%d load decision candidates: %w", msg.Chat.ID, err)
+	}
+	byUpdateID := make(map[int64]model.Update, len(candidates)+len(batchCandidates))
+	for _, candidate := range candidates {
+		byUpdateID[candidate.UpdateID] = candidate
+	}
+	for _, candidate := range batchCandidates {
+		if candidate.Message.MessageID <= msg.MessageID {
+			byUpdateID[candidate.UpdateID] = candidate
+		}
+	}
+	byUpdateID[trigger.UpdateID] = trigger
+	candidates = candidates[:0]
+	for _, candidate := range byUpdateID {
+		candidates = append(candidates, candidate)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Message.MessageID == candidates[j].Message.MessageID {
+			return candidates[i].UpdateID < candidates[j].UpdateID
+		}
+		return candidates[i].Message.MessageID < candidates[j].Message.MessageID
+	})
+	if len(candidates) > maxDecisionCandidates {
+		log.Printf("decision candidates limited chat_id=%d thread_id=%d available=%d selected=%d", msg.Chat.ID, msg.MessageThreadID, len(candidates), maxDecisionCandidates)
+		selected := make([]model.Update, 0, maxDecisionCandidates)
+		for _, candidate := range candidates {
+			if candidate.UpdateID == trigger.UpdateID {
+				continue
+			}
+			selected = append(selected, candidate)
+			if len(selected) == maxDecisionCandidates-1 {
+				break
+			}
+		}
+		candidates = append(selected, trigger)
+		sort.Slice(candidates, func(i, j int) bool { return candidates[i].Message.MessageID < candidates[j].Message.MessageID })
+	}
+	messages := make([]model.Message, 0, len(candidates))
+	consideredUpdateIDs := make([]int64, 0, len(candidates))
+	for _, candidate := range candidates {
+		current := *candidate.Message
+		if len(current.Photo) > 0 {
+			current = w.describeCandidatePhoto(ctx, current, candidate.UpdateID, now)
+			if current.PhotoDescription != "" {
+				if err := w.Repo.AddIncoming(ctx, current, now); err != nil {
+					return nil, fmt.Errorf("chat_id=%d message_id=%d save photo description: %w", current.Chat.ID, current.MessageID, err)
+				}
+			}
+		}
+		messages = append(messages, current)
+		consideredUpdateIDs = append(consideredUpdateIDs, candidate.UpdateID)
+	}
 	history, err := w.Repo.Conversation(ctx, msg.Chat.ID, msg.MessageThreadID, now)
 	if err != nil {
 		return nil, fmt.Errorf("chat_id=%d load conversation: %w", msg.Chat.ID, err)
@@ -311,6 +379,9 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 	}
 	for _, current := range messages {
 		request.NewMessageIDs = append(request.NewMessageIDs, current.MessageID)
+		if _, mentioned := model.MentionedText(current, w.Username); mentioned || w.repliedToBot(current) {
+			request.TriggerMessageIDs = append(request.TriggerMessageIDs, current.MessageID)
+		}
 		if w.repliedToBot(current) {
 			request.NewReplyToBotIDs = append(request.NewReplyToBotIDs, current.MessageID)
 			botText := model.MessageHistoryText(*current.ReplyToMessage)
@@ -328,7 +399,7 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 		request.CurrentReplyToMessageID = msg.ReplyToMessage.MessageID
 		request.CurrentRepliedToBot = w.repliedToBot(msg)
 	}
-	log.Printf("AI decision started chat_id=%d thread_id=%d new_messages=%d context_messages=%d selected_messages=%d important_entries=%d", msg.Chat.ID, msg.MessageThreadID, len(messages), len(history), len(selectedHistory), len(important))
+	log.Printf("AI decision started chat_id=%d thread_id=%d candidate_messages=%d context_messages=%d selected_messages=%d important_entries=%d", msg.Chat.ID, msg.MessageThreadID, len(messages), len(history), len(selectedHistory), len(important))
 	started := time.Now()
 	decision, err := w.AI.Ask(ctx, request)
 	if err != nil {
@@ -388,10 +459,10 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 		if validActionTarget(action, selectedHistory, messages) {
 			validActions = append(validActions, action)
 		} else {
-			log.Printf("AI selected invalid action target update_id=%d chat_id=%d action=%s reply_to_message_id=%d", item.UpdateID, msg.Chat.ID, action.Action, action.ReplyToMessageID)
+			log.Printf("AI selected invalid action target update_id=%d chat_id=%d action=%s reply_to_message_id=%d", trigger.UpdateID, msg.Chat.ID, action.Action, action.ReplyToMessageID)
 		}
 	}
-	plan := model.ActionPlan{UpdateIDs: updateIDs, Actions: validActions}
+	plan := model.ActionPlan{UpdateIDs: updateIDs, ConsideredUpdateIDs: consideredUpdateIDs, Actions: validActions}
 	if w.ActionPlans != nil {
 		plan, err = w.ActionPlans.SaveActionPlan(ctx, msg.Chat.ID, msg.MessageThreadID, firstUpdateID, plan)
 		if err != nil {
@@ -401,6 +472,9 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 	log.Printf("AI chose actions chat_id=%d thread_id=%d count=%d duration=%s", msg.Chat.ID, msg.MessageThreadID, len(plan.Actions), time.Since(started))
 	if err := w.executePlan(ctx, msg, firstUpdateID, plan); err != nil {
 		return nil, err
+	}
+	if err := w.Repo.MarkUpdatesConsidered(ctx, plan.ConsideredUpdateIDs); err != nil {
+		return nil, fmt.Errorf("mark decision candidates considered: %w", err)
 	}
 	return plan.UpdateIDs, nil
 }

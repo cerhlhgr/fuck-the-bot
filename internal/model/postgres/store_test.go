@@ -124,8 +124,23 @@ func TestPostgresHistoryAndInbox(t *testing.T) {
 	if err != nil || len(pending) != 1 || pending[0].UpdateID != updateID {
 		t.Fatalf("queued updates = %+v, %v", pending, err)
 	}
+	candidates, err := store.UnconsideredUpdates(ctx, chatID, 0, msg.MessageID, now, 10)
+	if err != nil || len(candidates) != 1 || candidates[0].UpdateID != updateID {
+		t.Fatalf("unconsidered updates = %+v, %v", candidates, err)
+	}
 	if err := store.MarkUpdatesProcessed(ctx, []int64{updateID}); err != nil {
 		t.Fatal(err)
+	}
+	candidates, err = store.UnconsideredUpdates(ctx, chatID, 0, msg.MessageID, now, 10)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("processed update disappeared before decision: %+v, %v", candidates, err)
+	}
+	if err := store.MarkUpdatesConsidered(ctx, []int64{updateID}); err != nil {
+		t.Fatal(err)
+	}
+	candidates, err = store.UnconsideredUpdates(ctx, chatID, 0, msg.MessageID, now, 10)
+	if err != nil || len(candidates) != 0 {
+		t.Fatalf("considered update reappeared: %+v, %v", candidates, err)
 	}
 	pending, err = store.PendingUpdates(ctx, 0, 10)
 	if err != nil || len(pending) != 0 {

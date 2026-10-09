@@ -45,6 +45,9 @@ func (s *Store) SaveActionPlan(ctx context.Context, chatID, threadID, firstUpdat
 	if plan.Actions == nil {
 		plan.Actions = []model.Decision{}
 	}
+	if plan.ConsideredUpdateIDs == nil {
+		plan.ConsideredUpdateIDs = []int64{}
+	}
 	actionsJSON, err := json.Marshal(plan.Actions)
 	if err != nil {
 		return model.ActionPlan{}, err

@@ -15,6 +15,8 @@ import (
 
 type fakeRepo struct {
 	queued               []model.Update
+	allUpdates           []model.Update
+	consideredUpdates    map[int64]bool
 	insertErr            error
 	incoming             []model.Message
 	botReplies           []string
@@ -57,8 +59,35 @@ func (f *fakeRepo) EnqueueUpdate(_ context.Context, item model.Update, _ []byte)
 		return f.insertErr
 	}
 	f.queued = append(f.queued, item)
+	f.allUpdates = append(f.allUpdates, item)
 	if item.Message != nil {
 		_ = f.AddIncoming(context.Background(), *item.Message, time.Now())
+	}
+	return nil
+}
+func (f *fakeRepo) UnconsideredUpdates(_ context.Context, chatID, threadID, beforeMessageID int64, now time.Time, limit int) ([]model.Update, error) {
+	var candidates []model.Update
+	for _, update := range f.allUpdates {
+		msg := update.Message
+		if msg == nil || msg.Chat.ID != chatID || msg.MessageThreadID != threadID || msg.MessageID > beforeMessageID || f.consideredUpdates[update.UpdateID] {
+			continue
+		}
+		if msg.Date != 0 && time.Unix(msg.Date, 0).Before(now.Add(-model.ContextLifetime)) {
+			continue
+		}
+		candidates = append(candidates, update)
+		if len(candidates) == limit {
+			break
+		}
+	}
+	return candidates, nil
+}
+func (f *fakeRepo) MarkUpdatesConsidered(_ context.Context, ids []int64) error {
+	if f.consideredUpdates == nil {
+		f.consideredUpdates = make(map[int64]bool)
+	}
+	for _, id := range ids {
+		f.consideredUpdates[id] = true
 	}
 	return nil
 }
@@ -389,7 +418,7 @@ func TestWorkerAsksToClarifyAmbiguousContact(t *testing.T) {
 	}
 }
 
-func TestScheduledRunCallsAIOnlyForMentionOrReplyToBot(t *testing.T) {
+func TestScheduledRunUsesMentionOrReplyToReviewPendingChatMessages(t *testing.T) {
 	repo := &fakeRepo{}
 	first := model.Message{MessageID: 10, Text: "Встречаемся в пятницу"}
 	mentioned := model.Message{MessageID: 11, Text: "Во сколько?"}
@@ -407,8 +436,8 @@ func TestScheduledRunCallsAIOnlyForMentionOrReplyToBot(t *testing.T) {
 	if err := worker.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if ai.calls != 1 || len(ai.request.NewMessageIDs) != 2 || ai.request.NewMessageIDs[0] != 11 || ai.request.NewMessageIDs[1] != 12 || len(ai.request.NewReplyToBotIDs) != 1 || ai.request.NewReplyToBotIDs[0] != 12 || len(repo.incoming) != 4 || len(repo.queued) != 0 {
-		t.Fatalf("mention filter failed: calls=%d new=%v stored=%d pending=%d", ai.calls, ai.request.NewMessageIDs, len(repo.incoming), len(repo.queued))
+	if ai.calls != 1 || len(ai.request.NewMessageIDs) != 3 || ai.request.NewMessageIDs[0] != 10 || ai.request.NewMessageIDs[1] != 11 || ai.request.NewMessageIDs[2] != 12 || len(ai.request.TriggerMessageIDs) != 2 || ai.request.TriggerMessageIDs[0] != 11 || ai.request.TriggerMessageIDs[1] != 12 || len(ai.request.NewReplyToBotIDs) != 1 || ai.request.NewReplyToBotIDs[0] != 12 || len(repo.incoming) != 4 || len(repo.queued) != 0 {
+		t.Fatalf("candidate selection failed: calls=%d new=%v triggers=%v stored=%d pending=%d", ai.calls, ai.request.NewMessageIDs, ai.request.TriggerMessageIDs, len(repo.incoming), len(repo.queued))
 	}
 	if len(ai.request.History) != 3 || ai.request.History[0].MessageID != 10 || ai.request.History[1].MessageID != 11 || ai.request.History[2].MessageID != 12 {
 		t.Fatalf("unexpected history around mention: %+v", ai.request.History)

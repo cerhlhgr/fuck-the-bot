@@ -203,15 +203,22 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	}
 	for _, key := range order {
 		items := groups[key]
-		processedIDs, err := w.processBatch(ctx, items)
-		if err != nil {
-			log.Printf("process dialogue batch chat_id=%d thread_id=%d first_update_id=%d count=%d: %v", key.chatID, key.threadID, items[0].UpdateID, len(items), err)
-			continue
+		for start := 0; start < len(items); start += maxDecisionCandidates {
+			end := start + maxDecisionCandidates
+			if end > len(items) {
+				end = len(items)
+			}
+			batch := items[start:end]
+			processedIDs, err := w.processBatch(ctx, batch)
+			if err != nil {
+				log.Printf("process dialogue batch chat_id=%d thread_id=%d first_update_id=%d count=%d: %v", key.chatID, key.threadID, batch[0].UpdateID, len(batch), err)
+				break
+			}
+			if err := w.Repo.MarkUpdatesProcessed(ctx, processedIDs); err != nil {
+				return fmt.Errorf("mark dialogue batch processed: %w", err)
+			}
+			log.Printf("dialogue batch processed chat_id=%d thread_id=%d updates=%d", key.chatID, key.threadID, len(processedIDs))
 		}
-		if err := w.Repo.MarkUpdatesProcessed(ctx, processedIDs); err != nil {
-			return fmt.Errorf("mark dialogue batch processed: %w", err)
-		}
-		log.Printf("dialogue batch processed chat_id=%d thread_id=%d updates=%d", key.chatID, key.threadID, len(processedIDs))
 	}
 	return nil
 }
@@ -259,7 +266,7 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 	}
 	now := time.Now()
 	var batchCandidates []model.Update
-	var trigger model.Update
+	var latest model.Update
 	for _, pending := range items {
 		if pending.Message == nil {
 			log.Printf("update skipped update_id=%d reason=no_message", pending.UpdateID)
@@ -271,8 +278,6 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 		}
 		msg := *pending.Message
 		log.Printf("message loaded update_id=%d chat_id=%d thread_id=%d message_id=%d", pending.UpdateID, msg.Chat.ID, msg.MessageThreadID, msg.MessageID)
-		_, mentioned := model.MentionedText(msg, w.Username)
-		repliedToBot := w.repliedToBot(msg)
 		if err := w.Repo.AddIncoming(ctx, msg, now); err != nil {
 			return nil, fmt.Errorf("chat_id=%d message_id=%d save incoming message: %w", msg.Chat.ID, msg.MessageID, err)
 		}
@@ -289,31 +294,31 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 		}
 		pending.Message = &msg
 		batchCandidates = append(batchCandidates, pending)
-		if mentioned || repliedToBot {
-			trigger = pending
-		} else {
-			log.Printf("AI decision deferred update_id=%d reason=waiting_for_bot_mention_or_reply", pending.UpdateID)
-		}
+		latest = pending
 	}
-	if trigger.Message == nil {
+	if latest.Message == nil {
 		return updateIDs, nil
 	}
-	msg := *trigger.Message
-	candidates, err := w.Repo.UnconsideredUpdates(ctx, msg.Chat.ID, msg.MessageThreadID, msg.MessageID, now, maxDecisionCandidates-1)
-	if err != nil {
-		return nil, fmt.Errorf("chat_id=%d load decision candidates: %w", msg.Chat.ID, err)
+	msg := *latest.Message
+	if len(batchCandidates) > maxDecisionCandidates {
+		return nil, fmt.Errorf("chat_id=%d decision batch exceeds %d messages", msg.Chat.ID, maxDecisionCandidates)
 	}
-	byUpdateID := make(map[int64]model.Update, len(candidates)+len(batchCandidates))
-	for _, candidate := range candidates {
+	var olderCandidates []model.Update
+	if remaining := maxDecisionCandidates - len(batchCandidates); remaining > 0 {
+		var err error
+		olderCandidates, err = w.Repo.UnconsideredUpdates(ctx, msg.Chat.ID, msg.MessageThreadID, msg.MessageID, now, remaining)
+		if err != nil {
+			return nil, fmt.Errorf("chat_id=%d load decision candidates: %w", msg.Chat.ID, err)
+		}
+	}
+	byUpdateID := make(map[int64]model.Update, len(olderCandidates)+len(batchCandidates))
+	for _, candidate := range olderCandidates {
 		byUpdateID[candidate.UpdateID] = candidate
 	}
 	for _, candidate := range batchCandidates {
-		if candidate.Message.MessageID <= msg.MessageID {
-			byUpdateID[candidate.UpdateID] = candidate
-		}
+		byUpdateID[candidate.UpdateID] = candidate
 	}
-	byUpdateID[trigger.UpdateID] = trigger
-	candidates = candidates[:0]
+	candidates := make([]model.Update, 0, len(byUpdateID))
 	for _, candidate := range byUpdateID {
 		candidates = append(candidates, candidate)
 	}
@@ -323,21 +328,6 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 		}
 		return candidates[i].Message.MessageID < candidates[j].Message.MessageID
 	})
-	if len(candidates) > maxDecisionCandidates {
-		log.Printf("decision candidates limited chat_id=%d thread_id=%d available=%d selected=%d", msg.Chat.ID, msg.MessageThreadID, len(candidates), maxDecisionCandidates)
-		selected := make([]model.Update, 0, maxDecisionCandidates)
-		for _, candidate := range candidates {
-			if candidate.UpdateID == trigger.UpdateID {
-				continue
-			}
-			selected = append(selected, candidate)
-			if len(selected) == maxDecisionCandidates-1 {
-				break
-			}
-		}
-		candidates = append(selected, trigger)
-		sort.Slice(candidates, func(i, j int) bool { return candidates[i].Message.MessageID < candidates[j].Message.MessageID })
-	}
 	messages := make([]model.Message, 0, len(candidates))
 	consideredUpdateIDs := make([]int64, 0, len(candidates))
 	for _, candidate := range candidates {
@@ -459,7 +449,7 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 		if validActionTarget(action, messages) {
 			validActions = append(validActions, action)
 		} else {
-			log.Printf("AI selected invalid action target update_id=%d chat_id=%d action=%s reply_to_message_id=%d", trigger.UpdateID, msg.Chat.ID, action.Action, action.ReplyToMessageID)
+			log.Printf("AI selected invalid action target update_id=%d chat_id=%d action=%s reply_to_message_id=%d", latest.UpdateID, msg.Chat.ID, action.Action, action.ReplyToMessageID)
 		}
 	}
 	plan := model.ActionPlan{UpdateIDs: updateIDs, ConsideredUpdateIDs: consideredUpdateIDs, Actions: validActions}

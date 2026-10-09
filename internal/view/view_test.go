@@ -100,15 +100,15 @@ func TestSystemPromptDescribesWebSearchAvailability(t *testing.T) {
 
 func TestSystemPromptUsesJokerStyleAndTracksReferences(t *testing.T) {
 	prompt := SystemPrompt(model.DecisionRequest{BotUsername: "mybot"})
-	if !strings.Contains(prompt, "дружелюбный шутник") || !strings.Contains(prompt, "Сарказм и мат допустимы изредка") || !strings.Contains(prompt, "найди в переписке, к чему они относятся") || strings.Contains(prompt, "В большинстве текстовых ответов") {
+	if !strings.Contains(prompt, "саркастичный шутник с крепким языком") || !strings.Contains(prompt, "часто используй естественный мат") || !strings.Contains(prompt, "ехидные подколы и шутки") || !strings.Contains(prompt, "найди в переписке, к чему они относятся") || !strings.Contains(prompt, "trigger_message_ids=[]") || strings.Contains(prompt, "допустимы изредка") {
 		t.Fatal("joker style or conversation tracking missing from prompt")
 	}
 	for _, rule := range []string{
 		"полную сохранённую переписку этого чата и темы за последний час",
-		"само упоминание не обязывает отвечать",
-		"НЕ делает все последующие реплики обращениями к тебе",
-		"Вопрос, просьба или шутка в общем чате сами по себе не означают обращения к тебе",
-		"При сомнении молчи",
+		"Само упоминание тоже не обязывает отвечать",
+		"пустой список не запрещает отвечать",
+		"Можно отвечать и без прямого обращения к тебе",
+		"Если твой ответ будет лишним",
 		"Старые сообщения вне new_message_ids используй только как контекст",
 	} {
 		if !strings.Contains(prompt, rule) {

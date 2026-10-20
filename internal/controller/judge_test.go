@@ -15,6 +15,16 @@ type fakeJudgeStore struct {
 	cases   map[int64]model.JudgeCase
 }
 
+type judgeContextRepo struct {
+	fakeRepo
+	conversationAt time.Time
+}
+
+func (r *judgeContextRepo) Conversation(ctx context.Context, chatID, threadID int64, now time.Time) ([]model.HistoryEntry, error) {
+	r.conversationAt = now
+	return r.fakeRepo.Conversation(ctx, chatID, threadID, now)
+}
+
 func (f *fakeJudgeStore) JudgeMode(context.Context, int64) (bool, error) { return f.enabled, nil }
 func (f *fakeJudgeStore) SetJudgeMode(_ context.Context, _ int64, enabled bool) error {
 	f.enabled = enabled
@@ -205,8 +215,26 @@ func TestNonAdminCannotSwitchJudgeMode(t *testing.T) {
 	if err := w.Process(context.Background(), model.Update{UpdateID: 10, Message: &msg}); err != nil {
 		t.Fatal(err)
 	}
-	if store.enabled || len(messenger.answers) != 0 {
+	if store.enabled || len(messenger.answers) != 1 || !strings.Contains(messenger.answers[0], "только администратор") {
 		t.Fatal("non-admin switched mode")
+	}
+}
+
+func TestJudgeLoadsMostRecentHour(t *testing.T) {
+	repo := &judgeContextRepo{}
+	store := &fakeJudgeStore{enabled: true}
+	tg := &fakeJudgeTG{}
+	judge := &fakeJudgeAI{}
+	w := Worker{Repo: repo, JudgeStore: store, JudgeTG: tg, JudgeAI: judge, Telegram: &fakeTelegram{}, BotID: 99}
+	msg := judgeMessage(11, 2, "Проверяем сообщение")
+	if err := w.Process(context.Background(), model.Update{UpdateID: 11, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if delta := time.Since(repo.conversationAt); delta < 0 || delta > time.Minute {
+		t.Fatalf("judge requested stale context at %s (now %s)", repo.conversationAt, time.Now())
+	}
+	if judge.calls != 1 {
+		t.Fatalf("judge was not called: %d", judge.calls)
 	}
 }
 

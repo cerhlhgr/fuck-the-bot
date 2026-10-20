@@ -515,6 +515,8 @@ func (w *Worker) processOrdinaryBatch(ctx context.Context, items []model.Update)
 			}
 		}
 		if validActionTarget(action, messages) {
+			action.Reply = clarifyMessageReferences(action.Reply, selectedHistory)
+			action.Caption = clarifyMessageReferences(action.Caption, selectedHistory)
 			validActions = append(validActions, action)
 		} else {
 			log.Printf("AI selected invalid action target update_id=%d chat_id=%d action=%s reply_to_message_id=%d", trigger.UpdateID, msg.Chat.ID, action.Action, action.ReplyToMessageID)

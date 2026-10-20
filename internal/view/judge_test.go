@@ -9,7 +9,7 @@ import (
 
 func TestJudgePromptAndDecision(t *testing.T) {
 	prompt := JudgePrompt(model.JudgeRequest{MessageID: 42, Author: "@user", Text: "текст"})
-	for _, part := range []string{"Статья 1", "Статья 2", "Статья 3", "ориентации", `"message_id":42`} {
+	for _, part := range []string{"Статья 1", "Статья 2", "Статья 3", "ориентации", "Одного явно адресованного оскорбления достаточно", `"message_id":42`} {
 		if !strings.Contains(prompt, part) {
 			t.Fatalf("missing %q in judge prompt", part)
 		}

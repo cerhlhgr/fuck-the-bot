@@ -78,7 +78,7 @@ func (w *Worker) processJudgeUpdate(ctx context.Context, item model.Update, enab
 		if err := w.Repo.AddIncoming(ctx, msg, time.Now()); err != nil {
 			return fmt.Errorf("store judge message: %w", err)
 		}
-		history, err := w.Repo.Conversation(ctx, msg.Chat.ID, msg.MessageThreadID, time.Now().Add(-model.ContextLifetime))
+		history, err := w.Repo.Conversation(ctx, msg.Chat.ID, msg.MessageThreadID, time.Now())
 		if err != nil {
 			return fmt.Errorf("load judge context: %w", err)
 		}
@@ -139,7 +139,7 @@ func (w *Worker) applyJudgeCommand(ctx context.Context, msg model.Message, turnO
 	}
 	if !member.IsAdministrator() {
 		log.Printf("judge command ignored chat_id=%d message_id=%d reason=not_admin", msg.Chat.ID, msg.MessageID)
-		return nil
+		return w.Telegram.SendMessage(ctx, msg, "Включить или отключить режим судьи может только администратор беседы.")
 	}
 	if turnOn {
 		if msg.Chat.Type != "supergroup" {
@@ -154,7 +154,10 @@ func (w *Worker) applyJudgeCommand(ctx context.Context, msg model.Message, turnO
 		}
 	}
 	if wasEnabled == turnOn {
-		return nil
+		if turnOn {
+			return w.Telegram.SendMessage(ctx, msg, "Режим судьи уже включён. Проверяю новые сообщения без упоминания бота и пишу в чат только при нарушении.")
+		}
+		return w.Telegram.SendMessage(ctx, msg, "Режим судьи уже выключен.")
 	}
 	if err := w.JudgeStore.SetJudgeMode(ctx, msg.Chat.ID, turnOn); err != nil {
 		return fmt.Errorf("save judge mode: %w", err)

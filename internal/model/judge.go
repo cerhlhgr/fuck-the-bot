@@ -6,6 +6,7 @@ type ChatMember struct {
 	Status             string `json:"status"`
 	CanRestrictMembers bool   `json:"can_restrict_members"`
 	CanDeleteMessages  bool   `json:"can_delete_messages"`
+	CanSendMessages    bool   `json:"can_send_messages"`
 }
 
 func (m ChatMember) IsAdministrator() bool {
@@ -13,10 +14,13 @@ func (m ChatMember) IsAdministrator() bool {
 }
 
 type JudgeRequest struct {
-	MessageID int64
-	Author    string
-	Text      string
-	History   []HistoryEntry
+	MessageID     int64
+	Author        string
+	Text          string
+	History       []HistoryEntry
+	ReplyToUserID int64
+	ReplyToAuthor string
+	Contacts      []Contact
 }
 
 // Article 0 means no violation. Articles 1–3 map to the fixed rules in view.
@@ -24,6 +28,7 @@ type JudgeDecision struct {
 	Article           int
 	EvidenceMessageID int64
 	Reason            string
+	UnbanQuery        string
 }
 
 type JudgeCase struct {
@@ -32,6 +37,7 @@ type JudgeCase struct {
 	MessageID          int64
 	UserID             int64
 	Article            int
+	WarningOnly        bool
 	Phase              int
 	ForwardedMessageID int64
 }

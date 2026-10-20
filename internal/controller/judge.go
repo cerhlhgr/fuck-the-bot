@@ -21,6 +21,10 @@ type JudgeTelegram interface {
 	RestrictChatMember(context.Context, int64, int64, time.Time) error
 	KickChatMember(context.Context, int64, int64) error
 	DeleteMessage(context.Context, int64, int64) error
+	SendUnbanPoll(context.Context, model.Message, string) (int64, error)
+	StopUnbanPoll(context.Context, int64, int64) (model.UnbanPollResult, error)
+	UnrestrictChatMember(context.Context, int64, int64) error
+	UnbanChatMember(context.Context, int64, int64) error
 }
 
 func judgeCommand(msg model.Message) (bool, bool) {
@@ -83,14 +87,26 @@ func (w *Worker) processJudgeUpdate(ctx context.Context, item model.Update, enab
 			return fmt.Errorf("load judge context: %w", err)
 		}
 		log.Printf("judge review started update_id=%d chat_id=%d thread_id=%d message_id=%d context_messages=%d", item.UpdateID, msg.Chat.ID, msg.MessageThreadID, msg.MessageID, len(history))
-		decision, err := w.JudgeAI.Judge(ctx, model.JudgeRequest{
-			MessageID: msg.MessageID,
-			Author:    model.AuthorName(msg.From),
-			Text:      model.MessageHistoryText(msg),
-			History:   history,
-		})
+		request := model.JudgeRequest{
+			MessageID:     msg.MessageID,
+			Author:        model.AuthorName(msg.From),
+			Text:          model.MessageHistoryText(msg),
+			History:       history,
+			ReplyToUserID: replyToUserID(msg),
+			ReplyToAuthor: replyToAuthor(msg),
+		}
+		if likelyUnbanRequest(msg.Text) {
+			request.Contacts, err = w.Repo.RecentContacts(ctx, msg.Chat.ID, 100)
+			if err != nil {
+				return fmt.Errorf("load unban vote contacts: %w", err)
+			}
+		}
+		decision, err := w.JudgeAI.Judge(ctx, request)
 		if err != nil {
 			return fmt.Errorf("judge AI update_id=%d: %w", item.UpdateID, err)
+		}
+		if decision.UnbanQuery != "" {
+			return w.startUnbanVote(ctx, item.UpdateID, msg, decision.UnbanQuery)
 		}
 		if decision.Article == 0 {
 			log.Printf("judge no violation update_id=%d chat_id=%d message_id=%d", item.UpdateID, msg.Chat.ID, msg.MessageID)
@@ -103,25 +119,28 @@ func (w *Worker) processJudgeUpdate(ctx context.Context, item model.Update, enab
 		if err != nil {
 			return fmt.Errorf("check accused member: %w", err)
 		}
-		if member.IsAdministrator() || member.Status == "left" || member.Status == "kicked" {
+		if member.Status == "left" || member.Status == "kicked" {
 			log.Printf("judge sanction skipped update_id=%d chat_id=%d reason=member_not_eligible", item.UpdateID, msg.Chat.ID)
 			return nil
 		}
-		botMember, err := w.JudgeTG.GetChatMember(ctx, msg.Chat.ID, w.BotID)
-		if err != nil {
-			return fmt.Errorf("check judge bot permissions: %w", err)
-		}
-		if !botMember.IsAdministrator() || (botMember.Status != "creator" && !botMember.CanRestrictMembers) {
-			return fmt.Errorf("judge bot lacks can_restrict_members in chat_id=%d", msg.Chat.ID)
+		warningOnly := member.IsAdministrator()
+		if !warningOnly {
+			botMember, err := w.JudgeTG.GetChatMember(ctx, msg.Chat.ID, w.BotID)
+			if err != nil {
+				return fmt.Errorf("check judge bot permissions: %w", err)
+			}
+			if !botMember.IsAdministrator() || (botMember.Status != "creator" && !botMember.CanRestrictMembers) {
+				return fmt.Errorf("judge bot lacks can_restrict_members in chat_id=%d", msg.Chat.ID)
+			}
 		}
 		caseRecord, err = w.JudgeStore.SaveJudgeCase(ctx, model.JudgeCase{
 			UpdateID: item.UpdateID, ChatID: msg.Chat.ID, MessageID: msg.MessageID,
-			UserID: msg.From.ID, Article: decision.Article,
+			UserID: msg.From.ID, Article: decision.Article, WarningOnly: warningOnly,
 		})
 		if err != nil {
 			return fmt.Errorf("save judge case: %w", err)
 		}
-		log.Printf("judge violation recorded update_id=%d chat_id=%d message_id=%d user_id=%d article=%d", item.UpdateID, msg.Chat.ID, msg.MessageID, msg.From.ID, caseRecord.Article)
+		log.Printf("judge violation recorded update_id=%d chat_id=%d message_id=%d user_id=%d article=%d warning_only=%t", item.UpdateID, msg.Chat.ID, msg.MessageID, msg.From.ID, caseRecord.Article, caseRecord.WarningOnly)
 	}
 	if caseRecord.ChatID != msg.Chat.ID || caseRecord.MessageID != msg.MessageID || caseRecord.UserID != msg.From.ID {
 		return fmt.Errorf("judge case does not match update_id=%d", item.UpdateID)
@@ -164,7 +183,7 @@ func (w *Worker) applyJudgeCommand(ctx context.Context, msg model.Message, turnO
 	}
 	status := "Режим судьи выключен. Возвращаюсь к обычной работе."
 	if turnOn {
-		status = "Режим судьи включён. Проверяю новые сообщения по правилам беседы. Перед наказанием назову статью, предупрежу и объявлю приговор."
+		status = "Режим судьи включён. Проверяю новые сообщения по правилам беседы. При нарушении назову статью и предупрежу; администраторов не ограничиваю."
 	}
 	log.Printf("judge mode changed chat_id=%d enabled=%t by_user_id=%d", msg.Chat.ID, turnOn, msg.From.ID)
 	return w.Telegram.SendMessage(ctx, msg, status)
@@ -193,12 +212,25 @@ func (w *Worker) executeJudgeCase(ctx context.Context, msg model.Message, c mode
 		log.Printf("judge evidence forwarding recorded update_id=%d chat_id=%d source_message_id=%d forwarded_message_id=%d", c.UpdateID, c.ChatID, c.MessageID, forwardedID)
 	}
 	if c.Phase < 1 {
-		if err := w.Telegram.SendMessage(ctx, msg, title+". Предупреждение: нарушение зафиксировано. Сейчас будет применено наказание."); err != nil {
+		warning := title + ". Предупреждение: нарушение зафиксировано. Сейчас будет применено наказание."
+		if c.WarningOnly {
+			warning = title + ". Предупреждение администратору: нарушение зафиксировано. Ограничение не применяется."
+		}
+		if err := w.Telegram.SendMessage(ctx, msg, warning); err != nil {
 			return fmt.Errorf("send judge warning: %w", err)
 		}
 		if err := w.JudgeStore.AdvanceJudgeCase(ctx, c.UpdateID, 1); err != nil {
 			return fmt.Errorf("record judge warning: %w", err)
 		}
+	}
+	if c.WarningOnly {
+		if c.Phase < 3 {
+			if err := w.JudgeStore.AdvanceJudgeCase(ctx, c.UpdateID, 3); err != nil {
+				return fmt.Errorf("record admin warning completion: %w", err)
+			}
+		}
+		log.Printf("judge admin warned update_id=%d chat_id=%d user_id=%d article=%d", c.UpdateID, c.ChatID, c.UserID, c.Article)
+		return nil
 	}
 	if c.Phase < 2 {
 		if err := w.Telegram.SendMessage(ctx, msg, title+". Приговор: "+sentence+". Исполняю."); err != nil {

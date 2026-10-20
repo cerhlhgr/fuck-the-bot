@@ -58,6 +58,7 @@ type Worker struct {
 	JudgeStore  model.JudgeStore
 	JudgeAI     JudgeAI
 	JudgeTG     JudgeTelegram
+	UnbanVotes  model.UnbanVoteStore
 	Images      ImageSearcher
 	Search      WebSearcher
 	Photos      PhotoDownloader
@@ -179,6 +180,11 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			log.Printf("release decision lock: %v", err)
 		}
 	}()
+	if w.UnbanVotes != nil && w.JudgeTG != nil {
+		if err := w.processDueUnbanVotes(ctx, time.Now()); err != nil {
+			log.Printf("process due unban votes: %v", err)
+		}
+	}
 	updates, err := w.Repo.PendingUpdates(ctx, 0, batchPageSize)
 	if err != nil {
 		return fmt.Errorf("load pending updates: %w", err)

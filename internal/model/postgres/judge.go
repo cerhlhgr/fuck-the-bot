@@ -37,9 +37,9 @@ func (s *Store) JudgeCase(ctx context.Context, updateID int64) (model.JudgeCase,
 	defer cancel()
 	var c model.JudgeCase
 	err := s.pool.QueryRow(queryCtx, `
-		SELECT update_id, chat_id, message_id, user_id, article, phase, forwarded_message_id
+		SELECT update_id, chat_id, message_id, user_id, article, warning_only, phase, forwarded_message_id
 		FROM bot_judge_cases WHERE update_id = $1`, updateID).Scan(
-		&c.UpdateID, &c.ChatID, &c.MessageID, &c.UserID, &c.Article, &c.Phase, &c.ForwardedMessageID)
+		&c.UpdateID, &c.ChatID, &c.MessageID, &c.UserID, &c.Article, &c.WarningOnly, &c.Phase, &c.ForwardedMessageID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.JudgeCase{}, false, nil
 	}
@@ -50,9 +50,9 @@ func (s *Store) SaveJudgeCase(ctx context.Context, c model.JudgeCase) (model.Jud
 	queryCtx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	_, err := s.pool.Exec(queryCtx, `
-		INSERT INTO bot_judge_cases (update_id, chat_id, message_id, user_id, article)
-		VALUES ($1, $2, $3, $4, $5) ON CONFLICT (update_id) DO NOTHING`,
-		c.UpdateID, c.ChatID, c.MessageID, c.UserID, c.Article)
+		INSERT INTO bot_judge_cases (update_id, chat_id, message_id, user_id, article, warning_only)
+		VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (update_id) DO NOTHING`,
+		c.UpdateID, c.ChatID, c.MessageID, c.UserID, c.Article, c.WarningOnly)
 	if err != nil {
 		return model.JudgeCase{}, err
 	}

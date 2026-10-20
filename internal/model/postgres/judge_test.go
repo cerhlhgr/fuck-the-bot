@@ -65,4 +65,13 @@ func TestJudgeModeAndCasePersistence(t *testing.T) {
 	if err != nil || active {
 		t.Fatalf("mode was not disabled: %t, %v", active, err)
 	}
+	adminCase := model.JudgeCase{UpdateID: updateID + 1, ChatID: chatID, MessageID: 8, UserID: 43, Article: 2, WarningOnly: true}
+	defer func() { _, _ = pool.Exec(ctx, `DELETE FROM bot_judge_cases WHERE update_id = $1`, adminCase.UpdateID) }()
+	if _, err := store.SaveJudgeCase(ctx, adminCase); err != nil {
+		t.Fatal(err)
+	}
+	stored, found, err = postgres.New(pool).JudgeCase(ctx, adminCase.UpdateID)
+	if err != nil || !found || !stored.WarningOnly {
+		t.Fatalf("admin warning mode was not persisted: %+v, %t, %v", stored, found, err)
+	}
 }

@@ -1,0 +1,2 @@
+ALTER TABLE bot_judge_cases
+ADD COLUMN warning_only BOOLEAN NOT NULL DEFAULT FALSE;

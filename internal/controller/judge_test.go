@@ -60,10 +60,11 @@ func (f *fakeJudgeStore) RecordJudgeForward(_ context.Context, id, forwardedID i
 }
 
 type fakeJudgeAI struct {
-	article  int
-	articles []int
-	calls    int
-	request  model.JudgeRequest
+	article    int
+	articles   []int
+	unbanQuery string
+	calls      int
+	request    model.JudgeRequest
 }
 
 func (f *fakeJudgeAI) Judge(_ context.Context, r model.JudgeRequest) (model.JudgeDecision, error) {
@@ -73,14 +74,18 @@ func (f *fakeJudgeAI) Judge(_ context.Context, r model.JudgeRequest) (model.Judg
 	}
 	f.calls++
 	f.request = r
-	return model.JudgeDecision{Article: article, EvidenceMessageID: r.MessageID, Reason: "явное нарушение"}, nil
+	return model.JudgeDecision{Article: article, EvidenceMessageID: r.MessageID, Reason: "явное нарушение", UnbanQuery: f.unbanQuery}, nil
 }
 
 type fakeJudgeTG struct {
-	events       []string
-	forwardErr   error
-	restrictErr  error
-	restrictions []time.Time
+	events        []string
+	forwardErr    error
+	restrictErr   error
+	unrestrictErr error
+	unbanErr      error
+	restrictions  []time.Time
+	members       map[int64]model.ChatMember
+	pollResult    model.UnbanPollResult
 }
 
 func (f *fakeJudgeTG) ForwardMessage(_ context.Context, msg model.Message) (int64, error) {
@@ -92,10 +97,43 @@ func (f *fakeJudgeTG) ForwardMessage(_ context.Context, msg model.Message) (int6
 }
 
 func (f *fakeJudgeTG) GetChatMember(_ context.Context, _, userID int64) (model.ChatMember, error) {
+	if member, ok := f.members[userID]; ok {
+		return member, nil
+	}
 	if userID == 1 || userID == 99 {
 		return model.ChatMember{Status: "administrator", CanRestrictMembers: true, CanDeleteMessages: true}, nil
 	}
 	return model.ChatMember{Status: "member"}, nil
+}
+func (f *fakeJudgeTG) SendUnbanPoll(_ context.Context, _ model.Message, _ string) (int64, error) {
+	f.events = append(f.events, "send_unban_poll")
+	return 12345, nil
+}
+func (f *fakeJudgeTG) StopUnbanPoll(_ context.Context, _, _ int64) (model.UnbanPollResult, error) {
+	f.events = append(f.events, "stop_unban_poll")
+	return f.pollResult, nil
+}
+func (f *fakeJudgeTG) UnrestrictChatMember(_ context.Context, _, userID int64) error {
+	f.events = append(f.events, "unrestrict")
+	if f.unrestrictErr != nil {
+		return f.unrestrictErr
+	}
+	if f.members == nil {
+		f.members = make(map[int64]model.ChatMember)
+	}
+	f.members[userID] = model.ChatMember{Status: "member", CanSendMessages: true}
+	return nil
+}
+func (f *fakeJudgeTG) UnbanChatMember(_ context.Context, _, userID int64) error {
+	f.events = append(f.events, "unban")
+	if f.unbanErr != nil {
+		return f.unbanErr
+	}
+	if f.members == nil {
+		f.members = make(map[int64]model.ChatMember)
+	}
+	f.members[userID] = model.ChatMember{Status: "left"}
+	return nil
 }
 func (f *fakeJudgeTG) RestrictChatMember(_ context.Context, _, _ int64, until time.Time) error {
 	f.events = append(f.events, "restrict")
@@ -170,6 +208,46 @@ func TestJudgeModeWarnsThenSentencesThenRestricts(t *testing.T) {
 	off := judgeMessage(3, 1, "Режим судьи отключить")
 	if err := w.Process(ctx, model.Update{UpdateID: 3, Message: &off}); err != nil || store.enabled {
 		t.Fatalf("mode did not turn off: %v", err)
+	}
+}
+
+func TestJudgeWarnsAdministratorWithoutSanction(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeJudgeStore{enabled: true}
+	tg := &fakeJudgeTG{}
+	messenger := &judgeMessenger{events: &tg.events}
+	judge := &fakeJudgeAI{article: 2}
+	w := Worker{Repo: &fakeRepo{}, JudgeStore: store, JudgeTG: tg, JudgeAI: judge, Telegram: messenger, BotID: 99}
+	msg := judgeMessage(4, 1, "Оскорбление от администратора")
+	update := model.Update{UpdateID: 4, Message: &msg}
+	if err := w.Process(ctx, update); err != nil {
+		t.Fatal(err)
+	}
+	if judge.calls != 1 || len(tg.events) != 2 || tg.events[0] != "forward" || !strings.Contains(tg.events[1], "Предупреждение администратору") || !strings.Contains(tg.events[1], "Статья 2") {
+		t.Fatalf("administrator did not receive evidence and warning: %v", tg.events)
+	}
+	if len(tg.restrictions) != 0 || store.cases[4].Phase != 3 || !store.cases[4].WarningOnly {
+		t.Fatalf("administrator was sanctioned or warning was not saved: %+v events=%v", store.cases[4], tg.events)
+	}
+	if err := w.Process(ctx, update); err != nil {
+		t.Fatal(err)
+	}
+	if judge.calls != 1 || len(tg.events) != 2 {
+		t.Fatalf("retry repeated administrator warning: calls=%d events=%v", judge.calls, tg.events)
+	}
+}
+
+func TestJudgeAdminPrivacyWarningDoesNotForwardEvidence(t *testing.T) {
+	store := &fakeJudgeStore{enabled: true}
+	tg := &fakeJudgeTG{}
+	messenger := &judgeMessenger{events: &tg.events}
+	w := Worker{Repo: &fakeRepo{}, JudgeStore: store, JudgeTG: tg, JudgeAI: &fakeJudgeAI{article: 3}, Telegram: messenger, BotID: 99}
+	msg := judgeMessage(6, 1, "Нарушение конфиденциальности от администратора")
+	if err := w.Process(context.Background(), model.Update{UpdateID: 6, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(tg.events) != 1 || !strings.Contains(tg.events[0], "Статья 3") || store.cases[6].ForwardedMessageID != -1 || store.cases[6].Phase != 3 {
+		t.Fatalf("administrator privacy warning repeated evidence or failed: events=%v case=%+v", tg.events, store.cases[6])
 	}
 }
 

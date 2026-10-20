@@ -144,6 +144,48 @@ func (c *Client) RestrictChatMember(ctx context.Context, chatID, userID int64, u
 	return nil
 }
 
+func (c *Client) UnrestrictChatMember(ctx context.Context, chatID, userID int64) error {
+	permissions := map[string]bool{
+		"can_send_messages":         true,
+		"can_send_audios":           true,
+		"can_send_documents":        true,
+		"can_send_photos":           true,
+		"can_send_videos":           true,
+		"can_send_video_notes":      true,
+		"can_send_voice_notes":      true,
+		"can_send_polls":            true,
+		"can_send_other_messages":   true,
+		"can_add_web_page_previews": true,
+	}
+	var ok bool
+	if err := c.call(ctx, "restrictChatMember", struct {
+		ChatID      int64           `json:"chat_id"`
+		UserID      int64           `json:"user_id"`
+		Permissions map[string]bool `json:"permissions"`
+	}{chatID, userID, permissions}, &ok); err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("Telegram did not confirm member unrestriction")
+	}
+	return nil
+}
+
+func (c *Client) UnbanChatMember(ctx context.Context, chatID, userID int64) error {
+	var ok bool
+	if err := c.call(ctx, "unbanChatMember", struct {
+		ChatID       int64 `json:"chat_id"`
+		UserID       int64 `json:"user_id"`
+		OnlyIfBanned bool  `json:"only_if_banned"`
+	}{chatID, userID, true}, &ok); err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("Telegram did not confirm member unban")
+	}
+	return nil
+}
+
 func (c *Client) KickChatMember(ctx context.Context, chatID, userID int64) error {
 	// A short ban removes the user, then lets them rejoin later by invitation.
 	input := struct {
@@ -294,6 +336,53 @@ func (c *Client) SendPoll(ctx context.Context, original model.Message, poll mode
 	}
 	var sent json.RawMessage
 	return c.call(ctx, "sendPoll", input, &sent)
+}
+
+func (c *Client) SendUnbanPoll(ctx context.Context, original model.Message, targetName string) (int64, error) {
+	question := "Разблокировать " + model.CompactText(targetName, 240) + "? Голосование 10 минут"
+	input := struct {
+		ChatID          int64  `json:"chat_id"`
+		MessageThreadID int64  `json:"message_thread_id,omitempty"`
+		Question        string `json:"question"`
+		Options         []struct {
+			Text string `json:"text"`
+		} `json:"options"`
+		IsAnonymous           bool             `json:"is_anonymous"`
+		AllowsMultipleAnswers bool             `json:"allows_multiple_answers"`
+		ReplyParameters       *replyParameters `json:"reply_parameters,omitempty"`
+	}{ChatID: original.Chat.ID, MessageThreadID: original.MessageThreadID, Question: question, IsAnonymous: true, ReplyParameters: replyTo(original.MessageID)}
+	input.Options = []struct {
+		Text string `json:"text"`
+	}{{"За"}, {"Против"}}
+	var sent struct {
+		MessageID int64 `json:"message_id"`
+	}
+	if err := c.call(ctx, "sendPoll", input, &sent); err != nil {
+		return 0, err
+	}
+	if sent.MessageID <= 0 {
+		return 0, fmt.Errorf("Telegram sendPoll returned no message ID")
+	}
+	return sent.MessageID, nil
+}
+
+func (c *Client) StopUnbanPoll(ctx context.Context, chatID, messageID int64) (model.UnbanPollResult, error) {
+	var stopped struct {
+		Options []struct {
+			Text       string `json:"text"`
+			VoterCount int    `json:"voter_count"`
+		} `json:"options"`
+	}
+	if err := c.call(ctx, "stopPoll", struct {
+		ChatID    int64 `json:"chat_id"`
+		MessageID int64 `json:"message_id"`
+	}{chatID, messageID}, &stopped); err != nil {
+		return model.UnbanPollResult{}, err
+	}
+	if len(stopped.Options) != 2 || stopped.Options[0].Text != "За" || stopped.Options[1].Text != "Против" || stopped.Options[0].VoterCount < 0 || stopped.Options[1].VoterCount < 0 {
+		return model.UnbanPollResult{}, fmt.Errorf("Telegram stopPoll returned unexpected options")
+	}
+	return model.UnbanPollResult{Yes: stopped.Options[0].VoterCount, No: stopped.Options[1].VoterCount}, nil
 }
 
 func (c *Client) SendAudio(ctx context.Context, original model.Message, audioURL, title string) error {

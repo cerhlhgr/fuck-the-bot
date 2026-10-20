@@ -7,7 +7,7 @@ func TestLoadMigrationPairs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(scripts) != 10 {
+	if len(scripts) != 12 {
 		t.Fatalf("unexpected migration count: %d", len(scripts))
 	}
 	for i, script := range scripts {

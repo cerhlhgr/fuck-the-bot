@@ -55,6 +55,9 @@ type Worker struct {
 	ActionPlans model.ActionPlanStore
 	AI          AI
 	Telegram    Messenger
+	JudgeStore  model.JudgeStore
+	JudgeAI     JudgeAI
+	JudgeTG     JudgeTelegram
 	Images      ImageSearcher
 	Search      WebSearcher
 	Photos      PhotoDownloader
@@ -210,14 +213,16 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			}
 			batch := items[start:end]
 			processedIDs, err := w.processBatch(ctx, batch)
+			if len(processedIDs) > 0 {
+				if markErr := w.Repo.MarkUpdatesProcessed(ctx, processedIDs); markErr != nil {
+					return fmt.Errorf("mark dialogue batch processed: %w", markErr)
+				}
+				log.Printf("dialogue batch processed chat_id=%d thread_id=%d updates=%d", key.chatID, key.threadID, len(processedIDs))
+			}
 			if err != nil {
 				log.Printf("process dialogue batch chat_id=%d thread_id=%d first_update_id=%d count=%d: %v", key.chatID, key.threadID, batch[0].UpdateID, len(batch), err)
 				break
 			}
-			if err := w.Repo.MarkUpdatesProcessed(ctx, processedIDs); err != nil {
-				return fmt.Errorf("mark dialogue batch processed: %w", err)
-			}
-			log.Printf("dialogue batch processed chat_id=%d thread_id=%d updates=%d", key.chatID, key.threadID, len(processedIDs))
 		}
 	}
 	return nil
@@ -234,6 +239,57 @@ func (w *Worker) ProcessBatch(ctx context.Context, items []model.Update) error {
 }
 
 func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int64, error) {
+	if w.JudgeStore == nil || w.JudgeTG == nil || w.JudgeAI == nil {
+		return w.processOrdinaryBatch(ctx, items)
+	}
+	var processed []int64
+	for start := 0; start < len(items); {
+		item := items[start]
+		if item.Message == nil {
+			ids, err := w.processOrdinaryBatch(ctx, items[start:start+1])
+			if err != nil {
+				return processed, err
+			}
+			processed = append(processed, ids...)
+			start++
+			continue
+		}
+		mode, err := w.JudgeStore.JudgeMode(ctx, item.Message.Chat.ID)
+		if err != nil {
+			return processed, fmt.Errorf("load judge mode: %w", err)
+		}
+		if _, command := judgeCommand(*item.Message); command || mode {
+			if err := w.processJudgeUpdate(ctx, item, mode); err != nil {
+				return processed, err
+			}
+			if err := w.Repo.MarkUpdatesConsidered(ctx, []int64{item.UpdateID}); err != nil {
+				return processed, fmt.Errorf("mark judge update considered: %w", err)
+			}
+			processed = append(processed, item.UpdateID)
+			start++
+			continue
+		}
+		end := start + 1
+		for end < len(items) {
+			if items[end].Message == nil {
+				break
+			}
+			if _, command := judgeCommand(*items[end].Message); command {
+				break
+			}
+			end++
+		}
+		ids, err := w.processOrdinaryBatch(ctx, items[start:end])
+		if err != nil {
+			return processed, err
+		}
+		processed = append(processed, ids...)
+		start = end
+	}
+	return processed, nil
+}
+
+func (w *Worker) processOrdinaryBatch(ctx context.Context, items []model.Update) ([]int64, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}

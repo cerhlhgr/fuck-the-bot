@@ -55,6 +55,31 @@ func (c *Client) Ask(ctx context.Context, decisionRequest model.DecisionRequest)
 	return view.ParseAIDecision(content)
 }
 
+func (c *Client) Judge(ctx context.Context, request model.JudgeRequest) (model.JudgeDecision, error) {
+	input := struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}{Model: c.model}
+	input.Messages = append(input.Messages,
+		struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}{"system", view.JudgePrompt(request)},
+		struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}{"user", "Оцени текущее сообщение по правилам. Верни только JSON."},
+	)
+	content, err := c.completion(ctx, input, "judge", c.model)
+	if err != nil {
+		return model.JudgeDecision{}, err
+	}
+	return view.ParseJudgeDecision(content, request.MessageID)
+}
+
 func (c *Client) DescribePhoto(ctx context.Context, photo []byte) (string, error) {
 	contentType := http.DetectContentType(photo)
 	switch contentType {

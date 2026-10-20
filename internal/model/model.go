@@ -15,6 +15,7 @@ const (
 )
 
 var ErrChatMigrated = errors.New("Telegram group migrated to a supergroup")
+var ErrMessageCannotForward = errors.New("Telegram message cannot be forwarded")
 
 type User struct {
 	ID        int64  `json:"id"`
@@ -43,7 +44,8 @@ type Message struct {
 	IsTopicMessage  bool  `json:"is_topic_message"`
 	Date            int64 `json:"date"`
 	Chat            struct {
-		ID int64 `json:"id"`
+		ID   int64  `json:"id"`
+		Type string `json:"type"`
 	} `json:"chat"`
 	From             *User       `json:"from"`
 	Text             string      `json:"text"`

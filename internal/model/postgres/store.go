@@ -214,7 +214,10 @@ func (s *Store) Prune(ctx context.Context, now time.Time) error {
 	if err := s.pruneMusic(ctx, now); err != nil {
 		return err
 	}
-	return s.pruneActionPlans(ctx, now)
+	if err := s.pruneActionPlans(ctx, now); err != nil {
+		return err
+	}
+	return s.pruneJudgeCases(ctx, now)
 }
 
 func (s *Store) AddIncoming(ctx context.Context, msg model.Message, now time.Time) error {

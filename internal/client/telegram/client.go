@@ -93,6 +93,88 @@ func (c *Client) GetMe(ctx context.Context) (model.User, error) {
 	return me, err
 }
 
+func (c *Client) GetChatMember(ctx context.Context, chatID, userID int64) (model.ChatMember, error) {
+	var member model.ChatMember
+	err := c.call(ctx, "getChatMember", struct {
+		ChatID int64 `json:"chat_id"`
+		UserID int64 `json:"user_id"`
+	}{chatID, userID}, &member)
+	return member, err
+}
+
+func (c *Client) ForwardMessage(ctx context.Context, original model.Message) (int64, error) {
+	input := struct {
+		ChatID              int64 `json:"chat_id"`
+		MessageThreadID     int64 `json:"message_thread_id,omitempty"`
+		FromChatID          int64 `json:"from_chat_id"`
+		MessageID           int64 `json:"message_id"`
+		DisableNotification bool  `json:"disable_notification"`
+		ProtectContent      bool  `json:"protect_content"`
+	}{original.Chat.ID, original.MessageThreadID, original.Chat.ID, original.MessageID, true, true}
+	var forwarded struct {
+		MessageID int64 `json:"message_id"`
+	}
+	if err := c.call(ctx, "forwardMessage", input, &forwarded); err != nil {
+		if strings.Contains(err.Error(), "Telegram forwardMessage HTTP 400") {
+			return 0, fmt.Errorf("%w: %v", model.ErrMessageCannotForward, err)
+		}
+		return 0, err
+	}
+	if forwarded.MessageID <= 0 {
+		return 0, fmt.Errorf("Telegram forwardMessage returned no message ID")
+	}
+	return forwarded.MessageID, nil
+}
+
+func (c *Client) RestrictChatMember(ctx context.Context, chatID, userID int64, until time.Time) error {
+	input := struct {
+		ChatID                        int64           `json:"chat_id"`
+		UserID                        int64           `json:"user_id"`
+		Permissions                   map[string]bool `json:"permissions"`
+		UseIndependentChatPermissions bool            `json:"use_independent_chat_permissions"`
+		UntilDate                     int64           `json:"until_date"`
+	}{chatID, userID, map[string]bool{"can_send_messages": false}, true, until.Unix()}
+	var ok bool
+	if err := c.call(ctx, "restrictChatMember", input, &ok); err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("Telegram did not confirm member restriction")
+	}
+	return nil
+}
+
+func (c *Client) KickChatMember(ctx context.Context, chatID, userID int64) error {
+	// A short ban removes the user, then lets them rejoin later by invitation.
+	input := struct {
+		ChatID    int64 `json:"chat_id"`
+		UserID    int64 `json:"user_id"`
+		UntilDate int64 `json:"until_date"`
+	}{chatID, userID, time.Now().Add(time.Minute).Unix()}
+	var ok bool
+	if err := c.call(ctx, "banChatMember", input, &ok); err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("Telegram did not confirm member removal")
+	}
+	return nil
+}
+
+func (c *Client) DeleteMessage(ctx context.Context, chatID, messageID int64) error {
+	var ok bool
+	if err := c.call(ctx, "deleteMessage", struct {
+		ChatID    int64 `json:"chat_id"`
+		MessageID int64 `json:"message_id"`
+	}{chatID, messageID}, &ok); err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("Telegram did not confirm message deletion")
+	}
+	return nil
+}
+
 func (c *Client) DownloadPhoto(ctx context.Context, sizes []model.PhotoSize) ([]byte, error) {
 	var chosen model.PhotoSize
 	var chosenPixels int64

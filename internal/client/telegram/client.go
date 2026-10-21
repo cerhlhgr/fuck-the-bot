@@ -339,7 +339,7 @@ func (c *Client) SendPoll(ctx context.Context, original model.Message, poll mode
 }
 
 func (c *Client) SendUnbanPoll(ctx context.Context, original model.Message, targetName string) (int64, error) {
-	question := "Разблокировать " + model.CompactText(targetName, 240) + "? Голосование 10 минут"
+	question := "Разблокировать " + model.CompactText(targetName, 240) + "? Голосование 3 минуты"
 	input := struct {
 		ChatID          int64  `json:"chat_id"`
 		MessageThreadID int64  `json:"message_thread_id,omitempty"`

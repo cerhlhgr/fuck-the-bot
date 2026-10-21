@@ -28,6 +28,8 @@ type JudgeDecision struct {
 	Article           int
 	EvidenceMessageID int64
 	Reason            string
+	Target            string
+	BullyingBasis     string
 	UnbanQuery        string
 }
 
@@ -38,6 +40,7 @@ type JudgeCase struct {
 	UserID             int64
 	Article            int
 	WarningOnly        bool
+	AdminWarning       bool
 	Phase              int
 	ForwardedMessageID int64
 }

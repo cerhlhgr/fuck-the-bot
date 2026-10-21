@@ -29,6 +29,9 @@ func TestJudgeModeAndCasePersistence(t *testing.T) {
 	updateID := -chatID
 	defer func() {
 		_, _ = pool.Exec(ctx, `DELETE FROM bot_judge_cases WHERE update_id = $1`, updateID)
+		_, _ = pool.Exec(ctx, `DELETE FROM bot_judge_cases WHERE update_id = $1`, updateID+2)
+		_, _ = pool.Exec(ctx, `DELETE FROM bot_judge_cases WHERE update_id = $1`, updateID+3)
+		_, _ = pool.Exec(ctx, `DELETE FROM bot_judge_warnings WHERE chat_id = $1`, chatID)
 		_, _ = pool.Exec(ctx, `DELETE FROM bot_judge_modes WHERE chat_id = $1`, chatID)
 	}()
 	store := postgres.New(pool)
@@ -45,8 +48,17 @@ func TestJudgeModeAndCasePersistence(t *testing.T) {
 	}
 	caseRecord := model.JudgeCase{UpdateID: updateID, ChatID: chatID, MessageID: 7, UserID: 42, Article: 2}
 	stored, err := store.SaveJudgeCase(ctx, caseRecord)
-	if err != nil || stored.Article != 2 || stored.Phase != 0 {
+	if err != nil || stored.Article != 2 || stored.Phase != 0 || !stored.WarningOnly || stored.AdminWarning {
 		t.Fatalf("wrong saved case: %+v, %v", stored, err)
+	}
+	repeatCase := model.JudgeCase{UpdateID: updateID + 2, ChatID: chatID, MessageID: 9, UserID: 42, Article: 2}
+	repeated, err := postgres.New(pool).SaveJudgeCase(ctx, repeatCase)
+	if err != nil || repeated.WarningOnly || repeated.AdminWarning {
+		t.Fatalf("repeat violation should be sanctioned: %+v, %v", repeated, err)
+	}
+	firstAgain, err := postgres.New(pool).SaveJudgeCase(ctx, caseRecord)
+	if err != nil || !firstAgain.WarningOnly || firstAgain.AdminWarning {
+		t.Fatalf("saving the same update changed its outcome: %+v, %v", firstAgain, err)
 	}
 	if err := store.AdvanceJudgeCase(ctx, updateID, 2); err != nil {
 		t.Fatal(err)
@@ -65,13 +77,18 @@ func TestJudgeModeAndCasePersistence(t *testing.T) {
 	if err != nil || active {
 		t.Fatalf("mode was not disabled: %t, %v", active, err)
 	}
-	adminCase := model.JudgeCase{UpdateID: updateID + 1, ChatID: chatID, MessageID: 8, UserID: 43, Article: 2, WarningOnly: true}
+	adminCase := model.JudgeCase{UpdateID: updateID + 1, ChatID: chatID, MessageID: 8, UserID: 43, Article: 2, WarningOnly: true, AdminWarning: true}
 	defer func() { _, _ = pool.Exec(ctx, `DELETE FROM bot_judge_cases WHERE update_id = $1`, adminCase.UpdateID) }()
 	if _, err := store.SaveJudgeCase(ctx, adminCase); err != nil {
 		t.Fatal(err)
 	}
 	stored, found, err = postgres.New(pool).JudgeCase(ctx, adminCase.UpdateID)
-	if err != nil || !found || !stored.WarningOnly {
+	if err != nil || !found || !stored.WarningOnly || !stored.AdminWarning {
 		t.Fatalf("admin warning mode was not persisted: %+v, %t, %v", stored, found, err)
+	}
+	formerAdminCase := model.JudgeCase{UpdateID: updateID + 3, ChatID: chatID, MessageID: 10, UserID: 43, Article: 2}
+	formerAdmin, err := postgres.New(pool).SaveJudgeCase(ctx, formerAdminCase)
+	if err != nil || !formerAdmin.WarningOnly || formerAdmin.AdminWarning {
+		t.Fatalf("admin warning must not count toward member sanctions: %+v, %v", formerAdmin, err)
 	}
 }

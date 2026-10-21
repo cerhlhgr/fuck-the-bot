@@ -82,7 +82,7 @@ func TestJudgeStartsUnbanVoteAndOneYesVoteUnrestricts(t *testing.T) {
 	if store.votes[40].State != "open" || store.votes[40].TargetUserID != 3 || len(tg.events) != 1 || tg.events[0] != "send_unban_poll" || len(judge.request.Contacts) != 1 {
 		t.Fatalf("vote was not started: vote=%+v events=%v", store.votes[40], tg.events)
 	}
-	if delay := time.Until(store.votes[40].ClosesAt); delay < 9*time.Minute || delay > 11*time.Minute {
+	if delay := time.Until(store.votes[40].ClosesAt); delay < 2*time.Minute || delay > 4*time.Minute {
 		t.Fatalf("wrong vote duration: %s", delay)
 	}
 	vote := store.votes[40]

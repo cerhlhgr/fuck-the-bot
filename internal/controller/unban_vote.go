@@ -11,7 +11,7 @@ import (
 	"fuck-the-bot/internal/model"
 )
 
-const unbanVoteDuration = 10 * time.Minute
+const unbanVoteDuration = 3 * time.Minute
 
 func likelyUnbanRequest(text string) bool {
 	text = strings.ToLower(text)

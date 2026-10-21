@@ -27,7 +27,7 @@ func TestUnbanPollAndMemberReleaseMethods(t *testing.T) {
 		result := `true`
 		switch method {
 		case "sendPoll":
-			if string(input["message_thread_id"]) != "29" || !strings.Contains(string(input["question"]), "@vasya") || string(input["is_anonymous"]) != "true" {
+			if string(input["message_thread_id"]) != "29" || !strings.Contains(string(input["question"]), "@vasya") || !strings.Contains(string(input["question"]), "3 минуты") || string(input["is_anonymous"]) != "true" {
 				t.Fatalf("wrong vote poll payload: %v", input)
 			}
 			var options []struct {

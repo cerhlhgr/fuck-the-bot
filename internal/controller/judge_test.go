@@ -11,8 +11,9 @@ import (
 )
 
 type fakeJudgeStore struct {
-	enabled bool
-	cases   map[int64]model.JudgeCase
+	enabled  bool
+	cases    map[int64]model.JudgeCase
+	warnings map[[3]int64]bool
 }
 
 type judgeContextRepo struct {
@@ -41,6 +42,14 @@ func (f *fakeJudgeStore) SaveJudgeCase(_ context.Context, c model.JudgeCase) (mo
 	if previous, ok := f.cases[c.UpdateID]; ok {
 		return previous, nil
 	}
+	if !c.AdminWarning {
+		if f.warnings == nil {
+			f.warnings = map[[3]int64]bool{}
+		}
+		key := [3]int64{c.ChatID, c.UserID, int64(c.Article)}
+		c.WarningOnly = !f.warnings[key]
+		f.warnings[key] = true
+	}
 	f.cases[c.UpdateID] = c
 	return c, nil
 }
@@ -63,6 +72,8 @@ type fakeJudgeAI struct {
 	article    int
 	articles   []int
 	unbanQuery string
+	target     string
+	basis      string
 	calls      int
 	request    model.JudgeRequest
 }
@@ -74,7 +85,18 @@ func (f *fakeJudgeAI) Judge(_ context.Context, r model.JudgeRequest) (model.Judg
 	}
 	f.calls++
 	f.request = r
-	return model.JudgeDecision{Article: article, EvidenceMessageID: r.MessageID, Reason: "явное нарушение", UnbanQuery: f.unbanQuery}, nil
+	decision := model.JudgeDecision{Article: article, EvidenceMessageID: r.MessageID, Reason: "явное нарушение", UnbanQuery: f.unbanQuery}
+	if article == 2 {
+		decision.Target = f.target
+		if decision.Target == "" {
+			decision.Target = "@victim"
+		}
+		decision.BullyingBasis = f.basis
+		if decision.BullyingBasis == "" {
+			decision.BullyingBasis = "repeated"
+		}
+	}
+	return decision, nil
 }
 
 type fakeJudgeTG struct {
@@ -166,9 +188,17 @@ func judgeMessage(id, userID int64, text string) model.Message {
 	return msg
 }
 
-func TestJudgeModeWarnsThenSentencesThenRestricts(t *testing.T) {
+func judgeRepo() *fakeRepo {
+	contact := model.Contact{UserID: 4, Username: "victim", Name: "Пострадавший"}
+	return &fakeRepo{contacts: map[int64][]model.Contact{
+		-10042: {contact},
+		-10043: {contact},
+	}}
+}
+
+func TestJudgeModeWarnsFirstThenRestrictsOnRepeat(t *testing.T) {
 	ctx := context.Background()
-	repo := &fakeRepo{}
+	repo := judgeRepo()
 	store := &fakeJudgeStore{}
 	tg := &fakeJudgeTG{}
 	messenger := &judgeMessenger{events: &tg.events}
@@ -190,23 +220,31 @@ func TestJudgeModeWarnsThenSentencesThenRestricts(t *testing.T) {
 	if ordinary.calls != 0 || judge.calls != 1 {
 		t.Fatalf("wrong AI path: ordinary=%d judge=%d", ordinary.calls, judge.calls)
 	}
+	if len(tg.events) != 2 || tg.events[0] != "forward" || !strings.Contains(tg.events[1], "Предупреждение") || !strings.Contains(tg.events[1], "При повторном") || len(tg.restrictions) != 0 || !store.cases[2].WarningOnly || store.cases[2].Phase != 3 {
+		t.Fatalf("first violation must only warn: events=%v case=%+v", tg.events, store.cases[2])
+	}
+	tg.events = nil
+	repeat := judgeMessage(3, 2, "повторное оскорбительное сообщение")
+	if err := w.Process(ctx, model.Update{UpdateID: 3, Message: &repeat}); err != nil {
+		t.Fatal(err)
+	}
 	if len(tg.events) != 5 || tg.events[0] != "forward" || !strings.Contains(tg.events[1], "Статья 2") || !strings.Contains(tg.events[1], "Предупреждение") || !strings.Contains(tg.events[2], "Статья 2") || !strings.Contains(tg.events[2], "Приговор") || tg.events[3] != "restrict" || tg.events[4] != "delete" {
 		t.Fatalf("wrong warning/sentence/penalty order: %v", tg.events)
 	}
-	if store.cases[2].ForwardedMessageID != 1002 {
+	if store.cases[3].ForwardedMessageID != 1003 {
 		t.Fatal("forwarded evidence was not recorded")
 	}
 	if until := tg.restrictions[0]; time.Until(until) < 59*time.Minute || time.Until(until) > time.Hour+time.Minute {
 		t.Fatalf("wrong restriction duration: %s", until)
 	}
-	if store.cases[2].Phase != 3 {
+	if store.cases[3].Phase != 3 || store.cases[3].WarningOnly {
 		t.Fatal("sanction was not recorded")
 	}
-	if !repo.consideredUpdates[2] {
+	if !repo.consideredUpdates[2] || !repo.consideredUpdates[3] {
 		t.Fatal("judge message can be reconsidered by the ordinary worker")
 	}
-	off := judgeMessage(3, 1, "Режим судьи отключить")
-	if err := w.Process(ctx, model.Update{UpdateID: 3, Message: &off}); err != nil || store.enabled {
+	off := judgeMessage(4, 1, "Режим судьи отключить")
+	if err := w.Process(ctx, model.Update{UpdateID: 4, Message: &off}); err != nil || store.enabled {
 		t.Fatalf("mode did not turn off: %v", err)
 	}
 }
@@ -217,7 +255,7 @@ func TestJudgeWarnsAdministratorWithoutSanction(t *testing.T) {
 	tg := &fakeJudgeTG{}
 	messenger := &judgeMessenger{events: &tg.events}
 	judge := &fakeJudgeAI{article: 2}
-	w := Worker{Repo: &fakeRepo{}, JudgeStore: store, JudgeTG: tg, JudgeAI: judge, Telegram: messenger, BotID: 99}
+	w := Worker{Repo: judgeRepo(), JudgeStore: store, JudgeTG: tg, JudgeAI: judge, Telegram: messenger, BotID: 99}
 	msg := judgeMessage(4, 1, "Оскорбление от администратора")
 	update := model.Update{UpdateID: 4, Message: &msg}
 	if err := w.Process(ctx, update); err != nil {
@@ -234,6 +272,87 @@ func TestJudgeWarnsAdministratorWithoutSanction(t *testing.T) {
 	}
 	if judge.calls != 1 || len(tg.events) != 2 {
 		t.Fatalf("retry repeated administrator warning: calls=%d events=%v", judge.calls, tg.events)
+	}
+}
+
+func TestJudgeWarningsArePerChatUserAndArticle(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeJudgeStore{enabled: true}
+	tg := &fakeJudgeTG{}
+	messenger := &judgeMessenger{events: &tg.events}
+	judge := &fakeJudgeAI{articles: []int{2, 1, 2, 2, 2}}
+	w := Worker{Repo: judgeRepo(), JudgeStore: store, JudgeTG: tg, JudgeAI: judge, Telegram: messenger, BotID: 99}
+	for _, entry := range []struct {
+		updateID int64
+		userID   int64
+		chatID   int64
+	}{
+		{1, 2, -10042},
+		{2, 2, -10042},
+		{3, 3, -10042},
+		{4, 2, -10043},
+	} {
+		msg := judgeMessage(entry.updateID, entry.userID, "нарушение")
+		msg.Chat.ID = entry.chatID
+		if err := w.Process(ctx, model.Update{UpdateID: entry.updateID, Message: &msg}); err != nil {
+			t.Fatal(err)
+		}
+		if !store.cases[entry.updateID].WarningOnly {
+			t.Fatalf("first violation should warn independently: %+v", store.cases[entry.updateID])
+		}
+	}
+	if len(tg.restrictions) != 0 {
+		t.Fatal("warnings caused a restriction")
+	}
+	repeat := judgeMessage(5, 2, "повторное нарушение статьи 2")
+	if err := w.Process(ctx, model.Update{UpdateID: 5, Message: &repeat}); err != nil {
+		t.Fatal(err)
+	}
+	if store.cases[5].WarningOnly || len(tg.restrictions) != 1 {
+		t.Fatalf("repeat of the same article was not sanctioned: %+v restrictions=%v", store.cases[5], tg.restrictions)
+	}
+}
+
+func TestJudgeIgnoresBullyingWithoutKnownParticipant(t *testing.T) {
+	store := &fakeJudgeStore{enabled: true}
+	tg := &fakeJudgeTG{}
+	messenger := &judgeMessenger{events: &tg.events}
+	w := Worker{Repo: &fakeRepo{}, JudgeStore: store, JudgeTG: tg, JudgeAI: &fakeJudgeAI{article: 2, target: "@stranger"}, Telegram: messenger, BotID: 99}
+	msg := judgeMessage(7, 2, "Грубая шутка без адресата в беседе")
+	if err := w.Process(context.Background(), model.Update{UpdateID: 7, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.cases) != 0 || len(tg.events) != 0 {
+		t.Fatalf("unverified bullying target caused moderation: cases=%v events=%v", store.cases, tg.events)
+	}
+}
+
+func TestJudgeIgnoresBullyingAgainstFormerMember(t *testing.T) {
+	store := &fakeJudgeStore{enabled: true}
+	tg := &fakeJudgeTG{members: map[int64]model.ChatMember{4: {Status: "left"}}}
+	messenger := &judgeMessenger{events: &tg.events}
+	w := Worker{Repo: judgeRepo(), JudgeStore: store, JudgeTG: tg, JudgeAI: &fakeJudgeAI{article: 2}, Telegram: messenger, BotID: 99}
+	msg := judgeMessage(9, 2, "Нападка на бывшего участника")
+	if err := w.Process(context.Background(), model.Update{UpdateID: 9, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.cases) != 0 || len(tg.events) != 0 {
+		t.Fatalf("former member caused moderation: cases=%v events=%v", store.cases, tg.events)
+	}
+}
+
+func TestJudgeCanIdentifyParticipantFromReply(t *testing.T) {
+	store := &fakeJudgeStore{enabled: true}
+	tg := &fakeJudgeTG{}
+	messenger := &judgeMessenger{events: &tg.events}
+	w := Worker{Repo: &fakeRepo{}, JudgeStore: store, JudgeTG: tg, JudgeAI: &fakeJudgeAI{article: 2, target: "@victim", basis: "after_stop"}, Telegram: messenger, BotID: 99}
+	msg := judgeMessage(8, 2, "Нападка ответом на участника")
+	msg.ReplyToMessage = &model.Message{MessageID: 6, From: &model.User{ID: 4, Username: "victim"}}
+	if err := w.Process(context.Background(), model.Update{UpdateID: 8, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if !store.cases[8].WarningOnly || len(tg.events) != 2 {
+		t.Fatalf("replied-to participant was not recognized: case=%+v events=%v", store.cases[8], tg.events)
 	}
 }
 
@@ -258,19 +377,25 @@ func TestJudgeResumesPenaltyWithoutRepeatingNotices(t *testing.T) {
 	messenger := &judgeMessenger{events: &tg.events}
 	judge := &fakeJudgeAI{article: 1}
 	w := Worker{Repo: &fakeRepo{}, JudgeStore: store, JudgeTG: tg, JudgeAI: judge, Telegram: messenger, BotID: 99}
+	first := judgeMessage(4, 2, "первая угроза")
+	if err := w.Process(ctx, model.Update{UpdateID: 4, Message: &first}); err != nil {
+		t.Fatal(err)
+	}
+	tg.events = nil
+	messenger.answers = nil
 	msg := judgeMessage(5, 2, "угроза")
 	update := model.Update{UpdateID: 5, Message: &msg}
 	if err := w.Process(ctx, update); err == nil {
 		t.Fatal("expected Telegram failure")
 	}
-	if store.cases[5].Phase != 2 || judge.calls != 1 || len(messenger.answers) != 2 {
+	if store.cases[5].Phase != 2 || judge.calls != 2 || len(messenger.answers) != 2 {
 		t.Fatalf("wrong state after failure: case=%+v judge_calls=%d notices=%v", store.cases[5], judge.calls, messenger.answers)
 	}
 	tg.restrictErr = nil
 	if err := w.Process(ctx, update); err != nil {
 		t.Fatal(err)
 	}
-	if judge.calls != 1 || len(messenger.answers) != 2 || store.cases[5].Phase != 3 {
+	if judge.calls != 2 || len(messenger.answers) != 2 || store.cases[5].Phase != 3 {
 		t.Fatal("retry repeated AI decision or notices")
 	}
 	forwards := 0
@@ -321,6 +446,14 @@ func TestJudgeDoesNotForwardPrivateEvidence(t *testing.T) {
 	tg := &fakeJudgeTG{}
 	messenger := &judgeMessenger{events: &tg.events}
 	w := Worker{Repo: &fakeRepo{}, JudgeStore: store, JudgeTG: tg, JudgeAI: &fakeJudgeAI{article: 3}, Telegram: messenger, BotID: 99}
+	first := judgeMessage(19, 2, "чужие личные данные")
+	if err := w.Process(context.Background(), model.Update{UpdateID: 19, Message: &first}); err != nil {
+		t.Fatal(err)
+	}
+	if len(tg.events) != 1 || !store.cases[19].WarningOnly {
+		t.Fatalf("first privacy violation must only warn: events=%v case=%+v", tg.events, store.cases[19])
+	}
+	tg.events = nil
 	msg := judgeMessage(20, 2, "чужие личные данные")
 	if err := w.Process(context.Background(), model.Update{UpdateID: 20, Message: &msg}); err != nil {
 		t.Fatal(err)
@@ -335,6 +468,11 @@ func TestJudgeWarnsWhenMessageCannotBeForwarded(t *testing.T) {
 	tg := &fakeJudgeTG{forwardErr: model.ErrMessageCannotForward}
 	messenger := &judgeMessenger{events: &tg.events}
 	w := Worker{Repo: &fakeRepo{}, JudgeStore: store, JudgeTG: tg, JudgeAI: &fakeJudgeAI{article: 1}, Telegram: messenger, BotID: 99}
+	first := judgeMessage(20, 2, "угроза")
+	if err := w.Process(context.Background(), model.Update{UpdateID: 20, Message: &first}); err != nil {
+		t.Fatal(err)
+	}
+	tg.events = nil
 	msg := judgeMessage(21, 2, "угроза")
 	if err := w.Process(context.Background(), model.Update{UpdateID: 21, Message: &msg}); err != nil {
 		t.Fatal(err)
@@ -346,7 +484,7 @@ func TestJudgeWarnsWhenMessageCannotBeForwarded(t *testing.T) {
 
 func TestJudgeWorkerReviewsEveryQueuedMessageWithoutMention(t *testing.T) {
 	ctx := context.Background()
-	repo := &fakeRepo{}
+	repo := judgeRepo()
 	store := &fakeJudgeStore{enabled: true}
 	tg := &fakeJudgeTG{}
 	messenger := &judgeMessenger{events: &tg.events}
@@ -366,7 +504,7 @@ func TestJudgeWorkerReviewsEveryQueuedMessageWithoutMention(t *testing.T) {
 	if judge.calls != 2 || ordinary.calls != 0 || len(repo.queued) != 0 {
 		t.Fatalf("wrong worker route: judge=%d ordinary=%d pending=%d", judge.calls, ordinary.calls, len(repo.queued))
 	}
-	if len(messenger.answers) != 2 || len(tg.restrictions) != 1 || len(tg.events) != 5 {
+	if len(messenger.answers) != 1 || len(tg.restrictions) != 0 || len(tg.events) != 2 {
 		t.Fatalf("unexpected chat activity: notices=%v events=%v restrictions=%d", messenger.answers, tg.events, len(tg.restrictions))
 	}
 	if judge.request.MessageID != second.MessageID || len(judge.request.History) < 2 {

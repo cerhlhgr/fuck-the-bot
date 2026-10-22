@@ -74,12 +74,14 @@ func TestJudgeStartsUnbanVoteAndOneYesVoteUnrestricts(t *testing.T) {
 	tg := &fakeJudgeTG{members: map[int64]model.ChatMember{3: {Status: "restricted", CanSendMessages: false}}, pollResult: model.UnbanPollResult{Yes: 1, No: 0}}
 	messenger := &judgeMessenger{events: &tg.events}
 	judge := &fakeJudgeAI{unbanQuery: "@vasya"}
-	w := Worker{Repo: repo, JudgeStore: &fakeJudgeStore{enabled: true}, JudgeTG: tg, JudgeAI: judge, Telegram: messenger, UnbanVotes: store, BotID: 99}
+	ordinary := &fakeAI{decision: model.Decision{Action: "reply", Reply: "Лишний ответ", ReplyToMessageID: 40}}
+	w := Worker{Repo: repo, JudgeStore: &fakeJudgeStore{enabled: true}, JudgeTG: tg, JudgeAI: judge, AI: ordinary, Telegram: messenger, UnbanVotes: store, BotID: 99, Username: "mybot"}
 	msg := judgeMessage(40, 2, "Давайте разблокируем @vasya")
+	mentionTestMessage(&msg, "mybot")
 	if err := w.Process(ctx, model.Update{UpdateID: 40, Message: &msg}); err != nil {
 		t.Fatal(err)
 	}
-	if store.votes[40].State != "open" || store.votes[40].TargetUserID != 3 || len(tg.events) != 1 || tg.events[0] != "send_unban_poll" || len(judge.request.Contacts) != 1 {
+	if store.votes[40].State != "open" || store.votes[40].TargetUserID != 3 || len(tg.events) != 1 || tg.events[0] != "send_unban_poll" || len(judge.request.Contacts) != 1 || ordinary.calls != 0 {
 		t.Fatalf("vote was not started: vote=%+v events=%v", store.votes[40], tg.events)
 	}
 	if delay := time.Until(store.votes[40].ClosesAt); delay < 2*time.Minute || delay > 4*time.Minute {

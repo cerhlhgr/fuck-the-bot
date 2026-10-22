@@ -52,39 +52,41 @@ func judgeArticle(article int) (title, sentence string, duration time.Duration) 
 	}
 }
 
-func (w *Worker) processJudgeUpdate(ctx context.Context, item model.Update, enabled bool) error {
+// processJudgeUpdate reports whether this update was handled by moderation and
+// must be excluded from the ordinary conversation decision.
+func (w *Worker) processJudgeUpdate(ctx context.Context, item model.Update, enabled bool) (bool, error) {
 	if item.Message == nil {
-		return nil
+		return false, nil
 	}
 	msg := *item.Message
 	msg.NormalizeThread()
 	if msg.From != nil && msg.From.IsBot {
-		return nil
+		return false, nil
 	}
 	if turnOn, ok := judgeCommand(msg); ok {
-		return w.applyJudgeCommand(ctx, msg, turnOn, enabled)
+		return true, w.applyJudgeCommand(ctx, msg, turnOn, enabled)
 	}
 	if !enabled || msg.From == nil || msg.From.ID <= 0 || msg.SenderChat != nil {
-		return nil
+		return false, nil
 	}
 	if msg.Date != 0 && time.Unix(msg.Date, 0).Before(time.Now().Add(-48*time.Hour)) {
 		log.Printf("judge skipped old message update_id=%d chat_id=%d message_id=%d", item.UpdateID, msg.Chat.ID, msg.MessageID)
-		return nil
+		return false, nil
 	}
 	caseRecord, found, err := w.JudgeStore.JudgeCase(ctx, item.UpdateID)
 	if err != nil {
-		return fmt.Errorf("load judge case: %w", err)
+		return false, fmt.Errorf("load judge case: %w", err)
 	}
 	if !found {
 		if len(msg.Photo) > 0 {
 			msg = w.describeCandidatePhoto(ctx, msg, item.UpdateID, time.Now())
 		}
 		if err := w.Repo.AddIncoming(ctx, msg, time.Now()); err != nil {
-			return fmt.Errorf("store judge message: %w", err)
+			return false, fmt.Errorf("store judge message: %w", err)
 		}
 		history, err := w.Repo.Conversation(ctx, msg.Chat.ID, msg.MessageThreadID, time.Now())
 		if err != nil {
-			return fmt.Errorf("load judge context: %w", err)
+			return false, fmt.Errorf("load judge context: %w", err)
 		}
 		log.Printf("judge review started update_id=%d chat_id=%d thread_id=%d message_id=%d context_messages=%d", item.UpdateID, msg.Chat.ID, msg.MessageThreadID, msg.MessageID, len(history))
 		request := model.JudgeRequest{
@@ -98,49 +100,49 @@ func (w *Worker) processJudgeUpdate(ctx context.Context, item model.Update, enab
 		if likelyUnbanRequest(msg.Text) {
 			request.Contacts, err = w.Repo.RecentContacts(ctx, msg.Chat.ID, 100)
 			if err != nil {
-				return fmt.Errorf("load unban vote contacts: %w", err)
+				return false, fmt.Errorf("load unban vote contacts: %w", err)
 			}
 		}
 		decision, err := w.JudgeAI.Judge(ctx, request)
 		if err != nil {
-			return fmt.Errorf("judge AI update_id=%d: %w", item.UpdateID, err)
+			return false, fmt.Errorf("judge AI update_id=%d: %w", item.UpdateID, err)
 		}
 		if decision.UnbanQuery != "" {
-			return w.startUnbanVote(ctx, item.UpdateID, msg, decision.UnbanQuery)
+			return true, w.startUnbanVote(ctx, item.UpdateID, msg, decision.UnbanQuery)
 		}
 		if decision.Article == 0 {
 			log.Printf("judge no violation update_id=%d chat_id=%d message_id=%d", item.UpdateID, msg.Chat.ID, msg.MessageID)
-			return nil
+			return false, nil
 		}
 		if decision.Article < 1 || decision.Article > 3 || decision.EvidenceMessageID != msg.MessageID {
-			return fmt.Errorf("invalid judge decision update_id=%d", item.UpdateID)
+			return false, fmt.Errorf("invalid judge decision update_id=%d", item.UpdateID)
 		}
 		if decision.Article == 2 {
 			knownTarget, err := w.knownBullyingTarget(ctx, msg, decision.Target)
 			if err != nil {
-				return fmt.Errorf("verify bullying target: %w", err)
+				return false, fmt.Errorf("verify bullying target: %w", err)
 			}
-			if !knownTarget || !validBullyingBasis(decision.BullyingBasis) {
-				log.Printf("judge violation skipped update_id=%d chat_id=%d message_id=%d reason=unverified_bullying_target_or_basis", item.UpdateID, msg.Chat.ID, msg.MessageID)
-				return nil
+			if !knownTarget || decision.BullyingBasis != "direct_aggression" || !model.JudgeQuoteInMessage(decision.AggressionQuote, request.Text) {
+				log.Printf("judge violation skipped update_id=%d chat_id=%d message_id=%d reason=unverified_direct_aggression", item.UpdateID, msg.Chat.ID, msg.MessageID)
+				return false, nil
 			}
 		}
 		member, err := w.JudgeTG.GetChatMember(ctx, msg.Chat.ID, msg.From.ID)
 		if err != nil {
-			return fmt.Errorf("check accused member: %w", err)
+			return false, fmt.Errorf("check accused member: %w", err)
 		}
 		if member.Status == "left" || member.Status == "kicked" {
 			log.Printf("judge sanction skipped update_id=%d chat_id=%d reason=member_not_eligible", item.UpdateID, msg.Chat.ID)
-			return nil
+			return false, nil
 		}
 		adminWarning := member.IsAdministrator()
 		if !adminWarning {
 			botMember, err := w.JudgeTG.GetChatMember(ctx, msg.Chat.ID, w.BotID)
 			if err != nil {
-				return fmt.Errorf("check judge bot permissions: %w", err)
+				return false, fmt.Errorf("check judge bot permissions: %w", err)
 			}
 			if !botMember.IsAdministrator() || (botMember.Status != "creator" && !botMember.CanRestrictMembers) {
-				return fmt.Errorf("judge bot lacks can_restrict_members in chat_id=%d", msg.Chat.ID)
+				return false, fmt.Errorf("judge bot lacks can_restrict_members in chat_id=%d", msg.Chat.ID)
 			}
 		}
 		caseRecord, err = w.JudgeStore.SaveJudgeCase(ctx, model.JudgeCase{
@@ -148,14 +150,14 @@ func (w *Worker) processJudgeUpdate(ctx context.Context, item model.Update, enab
 			UserID: msg.From.ID, Article: decision.Article, WarningOnly: adminWarning, AdminWarning: adminWarning,
 		})
 		if err != nil {
-			return fmt.Errorf("save judge case: %w", err)
+			return false, fmt.Errorf("save judge case: %w", err)
 		}
 		log.Printf("judge violation recorded update_id=%d chat_id=%d message_id=%d user_id=%d article=%d warning_only=%t", item.UpdateID, msg.Chat.ID, msg.MessageID, msg.From.ID, caseRecord.Article, caseRecord.WarningOnly)
 	}
 	if caseRecord.ChatID != msg.Chat.ID || caseRecord.MessageID != msg.MessageID || caseRecord.UserID != msg.From.ID {
-		return fmt.Errorf("judge case does not match update_id=%d", item.UpdateID)
+		return false, fmt.Errorf("judge case does not match update_id=%d", item.UpdateID)
 	}
-	return w.executeJudgeCase(ctx, msg, caseRecord)
+	return true, w.executeJudgeCase(ctx, msg, caseRecord)
 }
 
 func (w *Worker) knownBullyingTarget(ctx context.Context, msg model.Message, target string) (bool, error) {
@@ -206,15 +208,6 @@ func judgeTargetMatches(target, username, name string) bool {
 	return name != "" && strings.EqualFold(target, name)
 }
 
-func validBullyingBasis(value string) bool {
-	switch value {
-	case "repeated", "after_stop", "severe_targeted":
-		return true
-	default:
-		return false
-	}
-}
-
 func (w *Worker) applyJudgeCommand(ctx context.Context, msg model.Message, turnOn, wasEnabled bool) error {
 	if msg.From == nil || msg.From.ID <= 0 || msg.SenderChat != nil {
 		return nil
@@ -241,7 +234,7 @@ func (w *Worker) applyJudgeCommand(ctx context.Context, msg model.Message, turnO
 	}
 	if wasEnabled == turnOn {
 		if turnOn {
-			return w.Telegram.SendMessage(ctx, msg, "Режим судьи уже включён. Проверяю новые сообщения без упоминания бота и пишу в чат только при нарушении.")
+			return w.Telegram.SendMessage(ctx, msg, "Режим судьи уже включён. Проверяю правила для всех сообщений и отвечаю на обращения к боту.")
 		}
 		return w.Telegram.SendMessage(ctx, msg, "Режим судьи уже выключен.")
 	}
@@ -250,7 +243,7 @@ func (w *Worker) applyJudgeCommand(ctx context.Context, msg model.Message, turnO
 	}
 	status := "Режим судьи выключен. Возвращаюсь к обычной работе."
 	if turnOn {
-		status = "Режим судьи включён. Проверяю новые сообщения по правилам беседы. За первое нарушение статьи предупрежу, за повторное применю наказание. Администраторов не ограничиваю."
+		status = "Режим судьи включён. Проверяю новые сообщения по правилам беседы и отвечаю на обращения к боту. За первое нарушение статьи предупрежу, за повторное в течение часа применю наказание. Администраторов не ограничиваю."
 	}
 	log.Printf("judge mode changed chat_id=%d enabled=%t by_user_id=%d", msg.Chat.ID, turnOn, msg.From.ID)
 	return w.Telegram.SendMessage(ctx, msg, status)
@@ -279,7 +272,7 @@ func (w *Worker) executeJudgeCase(ctx context.Context, msg model.Message, c mode
 		log.Printf("judge evidence forwarding recorded update_id=%d chat_id=%d source_message_id=%d forwarded_message_id=%d", c.UpdateID, c.ChatID, c.MessageID, forwardedID)
 	}
 	if c.Phase < 1 {
-		warning := title + ". Предупреждение: нарушение зафиксировано. При повторном нарушении этой статьи будет применено наказание."
+		warning := title + ". Предупреждение: нарушение зафиксировано. При повторном нарушении этой статьи в течение часа будет применено наказание."
 		if !c.WarningOnly {
 			warning = title + ". Предупреждение: повторное нарушение зафиксировано. Сейчас будет применено наказание."
 		}

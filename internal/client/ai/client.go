@@ -77,7 +77,7 @@ func (c *Client) Judge(ctx context.Context, request model.JudgeRequest) (model.J
 	if err != nil {
 		return model.JudgeDecision{}, err
 	}
-	return view.ParseJudgeDecision(content, request.MessageID)
+	return view.ParseJudgeDecision(content, request.MessageID, request.Text)
 }
 
 func (c *Client) DescribePhoto(ctx context.Context, photo []byte) (string, error) {

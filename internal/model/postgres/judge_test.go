@@ -31,6 +31,8 @@ func TestJudgeModeAndCasePersistence(t *testing.T) {
 		_, _ = pool.Exec(ctx, `DELETE FROM bot_judge_cases WHERE update_id = $1`, updateID)
 		_, _ = pool.Exec(ctx, `DELETE FROM bot_judge_cases WHERE update_id = $1`, updateID+2)
 		_, _ = pool.Exec(ctx, `DELETE FROM bot_judge_cases WHERE update_id = $1`, updateID+3)
+		_, _ = pool.Exec(ctx, `DELETE FROM bot_judge_cases WHERE update_id = $1`, updateID+4)
+		_, _ = pool.Exec(ctx, `DELETE FROM bot_judge_cases WHERE update_id = $1`, updateID+5)
 		_, _ = pool.Exec(ctx, `DELETE FROM bot_judge_warnings WHERE chat_id = $1`, chatID)
 		_, _ = pool.Exec(ctx, `DELETE FROM bot_judge_modes WHERE chat_id = $1`, chatID)
 	}()
@@ -59,6 +61,27 @@ func TestJudgeModeAndCasePersistence(t *testing.T) {
 	firstAgain, err := postgres.New(pool).SaveJudgeCase(ctx, caseRecord)
 	if err != nil || !firstAgain.WarningOnly || firstAgain.AdminWarning {
 		t.Fatalf("saving the same update changed its outcome: %+v, %v", firstAgain, err)
+	}
+	_, err = pool.Exec(ctx, `
+		UPDATE bot_judge_warnings SET created_at = $4
+		WHERE chat_id = $1 AND user_id = $2 AND article = $3`,
+		chatID, 42, 2, time.Now().Add(-time.Hour-time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	renewedCase := model.JudgeCase{UpdateID: updateID + 4, ChatID: chatID, MessageID: 11, UserID: 42, Article: 2}
+	renewed, err := postgres.New(pool).SaveJudgeCase(ctx, renewedCase)
+	if err != nil || !renewed.WarningOnly {
+		t.Fatalf("expired warning should start a new hour: %+v, %v", renewed, err)
+	}
+	var warningUpdateID int64
+	if err := pool.QueryRow(ctx, `SELECT first_update_id FROM bot_judge_warnings WHERE chat_id = $1 AND user_id = $2 AND article = $3`, chatID, 42, 2).Scan(&warningUpdateID); err != nil || warningUpdateID != renewedCase.UpdateID {
+		t.Fatalf("warning timestamp was not renewed: update_id=%d err=%v", warningUpdateID, err)
+	}
+	secondRepeat := model.JudgeCase{UpdateID: updateID + 5, ChatID: chatID, MessageID: 12, UserID: 42, Article: 2}
+	sanctioned, err := postgres.New(pool).SaveJudgeCase(ctx, secondRepeat)
+	if err != nil || sanctioned.WarningOnly {
+		t.Fatalf("repeat within the renewed hour should be sanctioned: %+v, %v", sanctioned, err)
 	}
 	if err := store.AdvanceJudgeCase(ctx, updateID, 2); err != nil {
 		t.Fatal(err)

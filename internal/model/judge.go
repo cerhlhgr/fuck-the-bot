@@ -1,6 +1,10 @@
 package model
 
-import "context"
+import (
+	"context"
+	"strings"
+	"unicode/utf8"
+)
 
 type ChatMember struct {
 	Status             string `json:"status"`
@@ -30,7 +34,16 @@ type JudgeDecision struct {
 	Reason            string
 	Target            string
 	BullyingBasis     string
+	AggressionQuote   string
 	UnbanQuery        string
+}
+
+// JudgeQuoteInMessage verifies that the quoted evidence came from the message
+// being moderated, rather than from older context or a model invention.
+func JudgeQuoteInMessage(quote, message string) bool {
+	quote = strings.TrimSpace(quote)
+	length := utf8.RuneCountInString(quote)
+	return length >= 4 && length <= 180 && strings.Contains(strings.ToLower(message), strings.ToLower(quote))
 }
 
 type JudgeCase struct {

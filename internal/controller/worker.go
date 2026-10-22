@@ -249,48 +249,58 @@ func (w *Worker) processBatch(ctx context.Context, items []model.Update) ([]int6
 		return w.processOrdinaryBatch(ctx, items)
 	}
 	var processed []int64
-	for start := 0; start < len(items); {
-		item := items[start]
+	var ordinary []model.Update
+	flushOrdinary := func() error {
+		if len(ordinary) == 0 {
+			return nil
+		}
+		ids, err := w.processOrdinaryBatch(ctx, ordinary)
+		processed = append(processed, ids...)
+		ordinary = nil
+		return err
+	}
+	for _, item := range items {
 		if item.Message == nil {
-			ids, err := w.processOrdinaryBatch(ctx, items[start:start+1])
+			if err := flushOrdinary(); err != nil {
+				return processed, err
+			}
+			ids, err := w.processOrdinaryBatch(ctx, []model.Update{item})
+			processed = append(processed, ids...)
 			if err != nil {
 				return processed, err
 			}
-			processed = append(processed, ids...)
-			start++
 			continue
+		}
+		item.Message.NormalizeThread()
+		if len(ordinary) > 0 {
+			first := ordinary[0].Message
+			if first.Chat.ID != item.Message.Chat.ID || first.MessageThreadID != item.Message.MessageThreadID {
+				if err := flushOrdinary(); err != nil {
+					return processed, err
+				}
+			}
 		}
 		mode, err := w.JudgeStore.JudgeMode(ctx, item.Message.Chat.ID)
 		if err != nil {
 			return processed, fmt.Errorf("load judge mode: %w", err)
 		}
 		if _, command := judgeCommand(*item.Message); command || mode {
-			if err := w.processJudgeUpdate(ctx, item, mode); err != nil {
+			handled, err := w.processJudgeUpdate(ctx, item, mode)
+			if err != nil {
 				return processed, err
 			}
-			if err := w.Repo.MarkUpdatesConsidered(ctx, []int64{item.UpdateID}); err != nil {
-				return processed, fmt.Errorf("mark judge update considered: %w", err)
+			if handled {
+				if err := w.Repo.MarkUpdatesConsidered(ctx, []int64{item.UpdateID}); err != nil {
+					return processed, fmt.Errorf("mark judge update considered: %w", err)
+				}
+				processed = append(processed, item.UpdateID)
+				continue
 			}
-			processed = append(processed, item.UpdateID)
-			start++
-			continue
 		}
-		end := start + 1
-		for end < len(items) {
-			if items[end].Message == nil {
-				break
-			}
-			if _, command := judgeCommand(*items[end].Message); command {
-				break
-			}
-			end++
-		}
-		ids, err := w.processOrdinaryBatch(ctx, items[start:end])
-		if err != nil {
-			return processed, err
-		}
-		processed = append(processed, ids...)
-		start = end
+		ordinary = append(ordinary, item)
+	}
+	if err := flushOrdinary(); err != nil {
+		return processed, err
 	}
 	return processed, nil
 }

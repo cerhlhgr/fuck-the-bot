@@ -13,7 +13,8 @@ import (
 type fakeJudgeStore struct {
 	enabled  bool
 	cases    map[int64]model.JudgeCase
-	warnings map[[3]int64]bool
+	warnings map[[3]int64]time.Time
+	now      time.Time
 }
 
 type judgeContextRepo struct {
@@ -44,11 +45,18 @@ func (f *fakeJudgeStore) SaveJudgeCase(_ context.Context, c model.JudgeCase) (mo
 	}
 	if !c.AdminWarning {
 		if f.warnings == nil {
-			f.warnings = map[[3]int64]bool{}
+			f.warnings = map[[3]int64]time.Time{}
+		}
+		now := f.now
+		if now.IsZero() {
+			now = time.Now()
 		}
 		key := [3]int64{c.ChatID, c.UserID, int64(c.Article)}
-		c.WarningOnly = !f.warnings[key]
-		f.warnings[key] = true
+		warnedAt, exists := f.warnings[key]
+		c.WarningOnly = !exists || !now.Before(warnedAt.Add(time.Hour))
+		if c.WarningOnly {
+			f.warnings[key] = now
+		}
 	}
 	f.cases[c.UpdateID] = c
 	return c, nil
@@ -74,6 +82,7 @@ type fakeJudgeAI struct {
 	unbanQuery string
 	target     string
 	basis      string
+	quote      string
 	calls      int
 	request    model.JudgeRequest
 }
@@ -93,7 +102,11 @@ func (f *fakeJudgeAI) Judge(_ context.Context, r model.JudgeRequest) (model.Judg
 		}
 		decision.BullyingBasis = f.basis
 		if decision.BullyingBasis == "" {
-			decision.BullyingBasis = "repeated"
+			decision.BullyingBasis = "direct_aggression"
+		}
+		decision.AggressionQuote = f.quote
+		if decision.AggressionQuote == "" {
+			decision.AggressionQuote = r.Text
 		}
 	}
 	return decision, nil
@@ -249,6 +262,38 @@ func TestJudgeModeWarnsFirstThenRestrictsOnRepeat(t *testing.T) {
 	}
 }
 
+func TestJudgeWarningExpiresAfterOneHour(t *testing.T) {
+	ctx := context.Background()
+	start := time.Now()
+	store := &fakeJudgeStore{enabled: true, now: start}
+	tg := &fakeJudgeTG{}
+	w := Worker{
+		Repo: judgeRepo(), JudgeStore: store, JudgeTG: tg,
+		JudgeAI: &fakeJudgeAI{article: 2}, Telegram: &judgeMessenger{events: &tg.events}, BotID: 99,
+	}
+	for _, step := range []struct {
+		id           int64
+		elapsed      time.Duration
+		warning      bool
+		restrictions int
+	}{
+		{10, 0, true, 0},
+		{11, 59 * time.Minute, false, 1},
+		{12, time.Hour, true, 1},
+		{13, 2*time.Hour - time.Second, false, 2},
+		{14, 2 * time.Hour, true, 2},
+	} {
+		store.now = start.Add(step.elapsed)
+		msg := judgeMessage(step.id, 2, "нарушение статьи 2")
+		if err := w.Process(ctx, model.Update{UpdateID: step.id, Message: &msg}); err != nil {
+			t.Fatal(err)
+		}
+		if c := store.cases[step.id]; c.WarningOnly != step.warning || c.Phase != 3 || len(tg.restrictions) != step.restrictions {
+			t.Fatalf("after %s: case=%+v, restrictions=%d", step.elapsed, c, len(tg.restrictions))
+		}
+	}
+}
+
 func TestJudgeWarnsAdministratorWithoutSanction(t *testing.T) {
 	ctx := context.Background()
 	store := &fakeJudgeStore{enabled: true}
@@ -327,6 +372,32 @@ func TestJudgeIgnoresBullyingWithoutKnownParticipant(t *testing.T) {
 	}
 }
 
+func TestJudgeIgnoresBullyingWithoutDirectAggressionEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		basis string
+		quote string
+	}{
+		{name: "repeated teasing is insufficient", basis: "repeated"},
+		{name: "invented aggressive quote", quote: "заткнись, ты тупой"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeJudgeStore{enabled: true}
+			tg := &fakeJudgeTG{}
+			messenger := &judgeMessenger{events: &tg.events}
+			judge := &fakeJudgeAI{article: 2, basis: tc.basis, quote: tc.quote}
+			w := Worker{Repo: judgeRepo(), JudgeStore: store, JudgeTG: tg, JudgeAI: judge, Telegram: messenger, BotID: 99}
+			msg := judgeMessage(7, 2, "@victim, ну ты гений, опять проспал 😂")
+			if err := w.Process(context.Background(), model.Update{UpdateID: 7, Message: &msg}); err != nil {
+				t.Fatal(err)
+			}
+			if len(store.cases) != 0 || len(tg.events) != 0 {
+				t.Fatalf("teasing triggered moderation: cases=%v events=%v", store.cases, tg.events)
+			}
+		})
+	}
+}
+
 func TestJudgeIgnoresBullyingAgainstFormerMember(t *testing.T) {
 	store := &fakeJudgeStore{enabled: true}
 	tg := &fakeJudgeTG{members: map[int64]model.ChatMember{4: {Status: "left"}}}
@@ -345,7 +416,7 @@ func TestJudgeCanIdentifyParticipantFromReply(t *testing.T) {
 	store := &fakeJudgeStore{enabled: true}
 	tg := &fakeJudgeTG{}
 	messenger := &judgeMessenger{events: &tg.events}
-	w := Worker{Repo: &fakeRepo{}, JudgeStore: store, JudgeTG: tg, JudgeAI: &fakeJudgeAI{article: 2, target: "@victim", basis: "after_stop"}, Telegram: messenger, BotID: 99}
+	w := Worker{Repo: &fakeRepo{}, JudgeStore: store, JudgeTG: tg, JudgeAI: &fakeJudgeAI{article: 2, target: "@victim"}, Telegram: messenger, BotID: 99}
 	msg := judgeMessage(8, 2, "Нападка ответом на участника")
 	msg.ReplyToMessage = &model.Message{MessageID: 6, From: &model.User{ID: 4, Username: "victim"}}
 	if err := w.Process(context.Background(), model.Update{UpdateID: 8, Message: &msg}); err != nil {
@@ -509,5 +580,113 @@ func TestJudgeWorkerReviewsEveryQueuedMessageWithoutMention(t *testing.T) {
 	}
 	if judge.request.MessageID != second.MessageID || len(judge.request.History) < 2 {
 		t.Fatalf("judge lost conversation context: %+v", judge.request)
+	}
+}
+
+func TestJudgeModeKeepsOrdinaryConversationContext(t *testing.T) {
+	ctx := context.Background()
+	repo := judgeRepo()
+	judge := &fakeJudgeAI{}
+	ordinary := &fakeAI{decision: model.Decision{Action: "reply", Reply: "Отвечаю", ReplyToMessageID: 51}}
+	messenger := &fakeTelegram{}
+	w := Worker{Repo: repo, JudgeStore: &fakeJudgeStore{enabled: true}, JudgeTG: &fakeJudgeTG{}, JudgeAI: judge, AI: ordinary, Telegram: messenger, BotID: 99, Username: "mybot"}
+	first := judgeMessage(50, 2, "Во сколько встреча?")
+	if err := repo.EnqueueUpdate(ctx, model.Update{UpdateID: 50, Message: &first}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if judge.calls != 1 || ordinary.calls != 0 || repo.consideredUpdates[50] || len(repo.queued) != 0 {
+		t.Fatalf("ordinary message was lost or answered without trigger: judge=%d ordinary=%d considered=%v queued=%d", judge.calls, ordinary.calls, repo.consideredUpdates, len(repo.queued))
+	}
+	mention := judgeMessage(51, 2, "Так во сколько?")
+	mentionTestMessage(&mention, "mybot")
+	if err := repo.EnqueueUpdate(ctx, model.Update{UpdateID: 51, Message: &mention}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if judge.calls != 2 || ordinary.calls != 1 || len(ordinary.request.NewMessageIDs) != 2 || ordinary.request.NewMessageIDs[0] != 50 || ordinary.request.NewMessageIDs[1] != 51 || len(messenger.answers) != 1 || messenger.answers[0] != "Отвечаю" || !repo.consideredUpdates[50] || !repo.consideredUpdates[51] {
+		t.Fatalf("judge mode did not preserve ordinary reply context: judge=%d ordinary=%d request=%+v answers=%v", judge.calls, ordinary.calls, ordinary.request, messenger.answers)
+	}
+}
+
+func TestJudgeModeModeratesViolationAndAnswersOtherMention(t *testing.T) {
+	ctx := context.Background()
+	repo := judgeRepo()
+	store := &fakeJudgeStore{enabled: true}
+	tg := &fakeJudgeTG{}
+	messenger := &judgeMessenger{events: &tg.events}
+	judge := &fakeJudgeAI{articles: []int{2, 0}}
+	ordinary := &fakeAI{decision: model.Decision{Action: "reply", Reply: "Нормальный ответ", ReplyToMessageID: 61}}
+	w := Worker{Repo: repo, JudgeStore: store, JudgeTG: tg, JudgeAI: judge, AI: ordinary, Telegram: messenger, BotID: 99, Username: "mybot"}
+	for _, input := range []struct {
+		id   int64
+		text string
+	}{{60, "Травля участника"}, {61, "А на мой вопрос ответишь?"}} {
+		msg := judgeMessage(input.id, 2, input.text)
+		mentionTestMessage(&msg, "mybot")
+		if err := repo.EnqueueUpdate(ctx, model.Update{UpdateID: input.id, Message: &msg}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if judge.calls != 2 || ordinary.calls != 1 || len(ordinary.request.NewMessageIDs) != 1 || ordinary.request.NewMessageIDs[0] != 61 || len(messenger.answers) != 2 || messenger.answers[1] != "Нормальный ответ" || !store.cases[60].WarningOnly || len(repo.queued) != 0 {
+		t.Fatalf("merged mode lost moderation or ordinary answer: judge=%d ordinary=%d request=%+v answers=%v cases=%v", judge.calls, ordinary.calls, ordinary.request, messenger.answers, store.cases)
+	}
+}
+
+func TestJudgeModeAnswersReplyToBot(t *testing.T) {
+	ctx := context.Background()
+	repo := judgeRepo()
+	judge := &fakeJudgeAI{}
+	ordinary := &fakeAI{decision: model.Decision{Action: "reply", Reply: "Продолжаю", ReplyToMessageID: 71}}
+	messenger := &fakeTelegram{}
+	w := Worker{Repo: repo, JudgeStore: &fakeJudgeStore{enabled: true}, JudgeTG: &fakeJudgeTG{}, JudgeAI: judge, AI: ordinary, Telegram: messenger, BotID: 99, Username: "mybot"}
+	msg := judgeMessage(71, 2, "А дальше?")
+	msg.ReplyToMessage = &model.Message{MessageID: 70, Text: "Начало ответа", From: &model.User{ID: 99, IsBot: true}}
+	if err := w.Process(ctx, model.Update{UpdateID: 71, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	if judge.calls != 1 || ordinary.calls != 1 || len(ordinary.request.NewReplyToBotIDs) != 1 || ordinary.request.NewReplyToBotIDs[0] != 71 || len(messenger.answers) != 1 || messenger.answers[0] != "Продолжаю" {
+		t.Fatalf("judge mode did not answer reply to bot: judge=%d ordinary=%d request=%+v answers=%v", judge.calls, ordinary.calls, ordinary.request, messenger.answers)
+	}
+}
+
+func TestJudgePenaltyIsNotRepeatedWhenOrdinaryReplyFails(t *testing.T) {
+	ctx := context.Background()
+	repo := judgeRepo()
+	store := &fakeJudgeStore{enabled: true}
+	tg := &fakeJudgeTG{}
+	messenger := &judgeMessenger{events: &tg.events}
+	judge := &fakeJudgeAI{articles: []int{2, 0, 0}}
+	ordinary := &fakeAI{decision: model.Decision{Action: "reply", Reply: "Ответ", ReplyToMessageID: 81}, err: errors.New("AI temporarily unavailable")}
+	w := Worker{Repo: repo, JudgeStore: store, JudgeTG: tg, JudgeAI: judge, AI: ordinary, Telegram: messenger, BotID: 99, Username: "mybot"}
+	for _, input := range []struct {
+		id   int64
+		text string
+	}{{80, "Травля"}, {81, "Ответишь?"}} {
+		msg := judgeMessage(input.id, 2, input.text)
+		mentionTestMessage(&msg, "mybot")
+		if err := repo.EnqueueUpdate(ctx, model.Update{UpdateID: input.id, Message: &msg}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.queued) != 1 || repo.queued[0].UpdateID != 81 || !repo.consideredUpdates[80] || len(tg.events) != 2 || ordinary.calls != 1 {
+		t.Fatalf("moderation was not committed before ordinary failure: queued=%v considered=%v events=%v", repo.queued, repo.consideredUpdates, tg.events)
+	}
+	ordinary.err = nil
+	if err := w.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.queued) != 0 || judge.calls != 3 || ordinary.calls != 2 || len(tg.events) != 3 || len(messenger.answers) != 2 || messenger.answers[1] != "Ответ" {
+		t.Fatalf("retry repeated penalty or missed reply: queued=%v judge=%d ordinary=%d events=%v", repo.queued, judge.calls, ordinary.calls, tg.events)
 	}
 }

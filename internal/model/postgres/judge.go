@@ -69,8 +69,13 @@ func (s *Store) SaveJudgeCase(ctx context.Context, c model.JudgeCase) (model.Jud
 	if !c.AdminWarning {
 		var firstWarning bool
 		err = tx.QueryRow(queryCtx, `
-			INSERT INTO bot_judge_warnings (chat_id, user_id, article, first_update_id)
-			VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING RETURNING TRUE`,
+			INSERT INTO bot_judge_warnings (chat_id, user_id, article, first_update_id, created_at)
+			VALUES ($1, $2, $3, $4, clock_timestamp())
+			ON CONFLICT (chat_id, user_id, article) DO UPDATE
+			SET first_update_id = EXCLUDED.first_update_id,
+				created_at = EXCLUDED.created_at
+			WHERE bot_judge_warnings.created_at <= EXCLUDED.created_at - INTERVAL '1 hour'
+			RETURNING TRUE`,
 			c.ChatID, c.UserID, c.Article, c.UpdateID).Scan(&firstWarning)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return model.JudgeCase{}, err
